@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Animación para notificaciones */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Mejoras para modo oscuro */
+.dark {
+  color-scheme: dark;
+}
+
+/* Forzar colores de texto en modo oscuro para mejor legibilidad */
+.dark .dark\:text-white {
+  color: rgb(255 255 255) !important;
+}
+
+.dark .dark\:text-gray-300 {
+  color: rgb(209 213 219) !important;
+}
+
+/* Mejorar contraste de fondos en modo oscuro */
+.dark .dark\:bg-gray-800 {
+  background-color: rgb(31 41 55) !important;
+}
+
+.dark .dark\:bg-gray-700 {
+  background-color: rgb(55 65 81) !important;
+}
+
+.dark .dark\:bg-gray-600 {
+  background-color: rgb(75 85 99) !important;
+}
