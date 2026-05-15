@@ -44,6 +44,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             const { data, error } = await supabase
                 .from('restaurant_config')
                 .select('*')
+                .order('updated_at', { ascending: false, nullsFirst: false })
+                .limit(1)
                 .maybeSingle() as any;
 
             if (error) throw error;
@@ -69,17 +71,18 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
     const updateConfig = async (updates: Partial<RestaurantConfig>) => {
         try {
+            const updatesWithTime = { ...updates, updated_at: new Date().toISOString() };
             if (config?.id) {
                 const { error } = await supabase
                     .from('restaurant_config')
-                    .update(updates)
+                    .update(updatesWithTime)
                     .eq('id', config.id);
 
                 if (error) throw error;
             } else {
                 const { error } = await supabase
                     .from('restaurant_config')
-                    .insert(updates);
+                    .insert(updatesWithTime);
 
                 if (error) throw error;
             }

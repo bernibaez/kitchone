@@ -60,6 +60,12 @@ export default function Config() {
     }
   }, [config]);
 
+  useEffect(() => {
+    if (previewUrl) {
+      handlePreview();
+    }
+  }, [formData]);
+
   const handlePreview = async () => {
     const previewData = {
       saleNumber: 'FAC-000001',
