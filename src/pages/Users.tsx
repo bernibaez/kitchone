@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { useNotification } from '../contexts/NotificationContext';
 import {
@@ -20,7 +21,30 @@ interface UserProfile {
   role: UserRole;
   is_active: boolean;
   email?: string;
+  allowed_modules?: string[];
 }
+
+export const AVAILABLE_MODULES = [
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'users', label: 'Usuarios' },
+  { id: 'customers', label: 'Clientes' },
+  { id: 'categories', label: 'Categorías' },
+  { id: 'dishes', label: 'Platillos' },
+  { id: 'tables', label: 'Mesas' },
+  { id: 'expenses', label: 'Gastos' },
+  { id: 'sales', label: 'Facturación' },
+  { id: 'orders', label: 'Órdenes' },
+  { id: 'kitchen', label: 'Cocina' },
+  { id: 'history', label: 'Historial' },
+  { id: 'reports', label: 'Reportes' },
+  { id: 'config', label: 'Configuración' },
+];
+
+export const DEFAULT_MODULES_BY_ROLE: Record<string, string[]> = {
+  admin: ['dashboard', 'users', 'customers', 'categories', 'dishes', 'tables', 'expenses', 'sales', 'orders', 'kitchen', 'history', 'reports', 'config'],
+  mesero: ['dashboard', 'customers', 'sales', 'orders'],
+  cocinero: ['dashboard', 'kitchen'],
+};
 
 const ROLE_CONFIG: Record<string, { label: string; icon: any; color: string; modules: string[] }> = {
   admin: {
@@ -60,6 +84,7 @@ export default function Users() {
     password: '',
     full_name: '',
     role: 'mesero' as UserRole,
+    allowed_modules: DEFAULT_MODULES_BY_ROLE['mesero'],
   });
   const { showNotification } = useNotification();
 
@@ -72,6 +97,7 @@ export default function Users() {
       const { data: profiles, error } = await supabase
         .from('users_profile')
         .select('*')
+        .eq('is_active', true)
         .order('created_at', { ascending: false });
 
       if (error) {
@@ -111,27 +137,7 @@ export default function Users() {
 
   const roleCounts = getRoleCounts();
 
-  async function extractFunctionErrorMessage(err: Error): Promise<string> {
-    let msg = err.message || '';
-    const ctx = (err as { context?: Response }).context;
-    if (ctx && typeof ctx.json === 'function') {
-      try {
-        const body = await ctx.json();
-        if (body && typeof body === 'object' && 'error' in body && typeof (body as { error: string }).error === 'string') {
-          return (body as { error: string }).error;
-        }
-      } catch {
-        /* seguir con msg */
-      }
-    }
-    if (msg.includes('non-2xx') || msg.includes('Edge Function') || msg.includes('Failed to send')) {
-      return (
-        'No se pudo contactar la función create-user. En Supabase: despliega las Edge Functions ' +
-        '(create-user, delete-user) y revisa que existan las variables SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY.'
-      );
-    }
-    return msg || 'Error al crear usuario';
-  }
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -144,35 +150,49 @@ export default function Users() {
           .update({
             full_name: formData.full_name,
             role: formData.role,
+            allowed_modules: formData.allowed_modules,
           })
           .eq('id', editingUser.id);
         if (error) throw error;
       } else {
-        const { data: sessionData } = await supabase.auth.getSession();
-        const token = sessionData.session?.access_token;
-        if (!token) {
-          throw new Error('Sesión no válida. Vuelve a iniciar sesión.');
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+        const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+        if (!supabaseUrl || !supabaseAnonKey) {
+          throw new Error('No se encontraron las credenciales de Supabase en el entorno.');
         }
 
-        const response = await supabase.functions.invoke('create-user', {
-          body: {
-            email: formData.email.trim().toLowerCase(),
-            password: formData.password,
-            full_name: formData.full_name.trim(),
-            role: formData.role,
-          },
-          headers: {
-            Authorization: `Bearer ${token}`,
+        // Cliente secundario sin persistencia de sesión para no desloguear al admin
+        const secondarySupabase = createClient(supabaseUrl, supabaseAnonKey, {
+          auth: {
+            autoRefreshToken: false,
+            persistSession: false,
           },
         });
 
-        if (response.error) {
-          const detail = await extractFunctionErrorMessage(response.error);
-          throw new Error(detail);
+        const { data: signUpData, error: signUpError } = await secondarySupabase.auth.signUp({
+          email: formData.email.trim().toLowerCase(),
+          password: formData.password,
+        });
+
+        if (signUpError) {
+          throw new Error(signUpError.message);
         }
-        if (response.data && typeof response.data === 'object' && 'error' in response.data) {
-          const e = (response.data as { error?: string }).error;
-          if (e) throw new Error(e);
+
+        if (!signUpData.user) {
+          throw new Error('No se pudo crear el usuario en el sistema de autenticación.');
+        }
+
+        // Insertar el perfil con el cliente principal (ya que el script SQL ahora le da permiso al Admin)
+        const { error: profileError } = await supabase.from('users_profile').insert({
+          id: signUpData.user.id,
+          full_name: formData.full_name.trim(),
+          role: formData.role,
+          allowed_modules: formData.allowed_modules,
+        });
+
+        if (profileError) {
+          throw new Error(`Error al crear el perfil: ${profileError.message}`);
         }
       }
 
@@ -185,7 +205,7 @@ export default function Users() {
       });
       setShowModal(false);
       setEditingUser(null);
-      setFormData({ email: '', password: '', full_name: '', role: 'mesero' });
+      setFormData({ email: '', password: '', full_name: '', role: 'mesero', allowed_modules: DEFAULT_MODULES_BY_ROLE['mesero'] });
       loadUsers();
     } catch (error: unknown) {
       console.error('Error saving user:', error);
@@ -205,32 +225,13 @@ export default function Users() {
     if (!confirm('¿Estás seguro de que deseas eliminar este usuario?')) return;
 
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token;
-      if (!token) throw new Error('Sesión no válida.');
+      const { error } = await supabase
+        .from('users_profile')
+        .update({ is_active: false })
+        .eq('id', id);
 
-      const response = await supabase.functions.invoke('delete-user', {
-        body: { user_id: id },
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      if (response.error) {
-        const ctx = (response.error as { context?: Response }).context;
-        let detail = response.error.message;
-        if (ctx && typeof ctx.json === 'function') {
-          try {
-            const body = await ctx.json();
-            if (body?.error) detail = body.error;
-          } catch {
-            /* ignore */
-          }
-        }
-        throw new Error(detail || 'Error al eliminar usuario');
-      }
-
-      if (response.data && typeof response.data === 'object' && 'error' in response.data) {
-        const e = (response.data as { error?: string }).error;
-        if (e) throw new Error(e);
+      if (error) {
+        throw error;
       }
 
       showNotification({ type: 'success', title: 'Usuario eliminado', message: 'Usuario eliminado correctamente' });
@@ -249,6 +250,7 @@ export default function Users() {
       password: '',
       full_name: user.full_name,
       role: user.role,
+      allowed_modules: user.allowed_modules || DEFAULT_MODULES_BY_ROLE[user.role] || [],
     });
     setShowModal(true);
   };
@@ -275,7 +277,7 @@ export default function Users() {
         <button
           onClick={() => {
             setEditingUser(null);
-            setFormData({ email: '', password: '', full_name: '', role: 'mesero' });
+            setFormData({ email: '', password: '', full_name: '', role: 'mesero', allowed_modules: DEFAULT_MODULES_BY_ROLE['mesero'] });
             setShowModal(true);
           }}
           className="bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 flex items-center space-x-2 shadow-sm"
@@ -384,12 +386,17 @@ export default function Users() {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex space-x-1">
-                        {roleConfig.modules.map((mod, i) => (
+                      <div className="flex flex-wrap gap-1 max-w-[200px]">
+                        {(user.allowed_modules || roleConfig.modules).slice(0, 3).map((mod, i) => (
                           <span key={i} className="px-2 py-1 bg-gray-100 rounded text-xs text-gray-600 font-medium">
                             {mod}
                           </span>
                         ))}
+                        {(user.allowed_modules || roleConfig.modules).length > 3 && (
+                          <span className="px-2 py-1 bg-gray-100 rounded text-xs text-gray-600 font-medium">
+                            +{ (user.allowed_modules || roleConfig.modules).length - 3 }
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
@@ -478,13 +485,45 @@ export default function Users() {
                 </label>
                 <select
                   value={formData.role}
-                  onChange={(e) => setFormData({ ...formData, role: e.target.value as UserRole })}
+                  onChange={(e) => {
+                    const newRole = e.target.value as UserRole;
+                    setFormData({ 
+                      ...formData, 
+                      role: newRole,
+                      allowed_modules: DEFAULT_MODULES_BY_ROLE[newRole] || []
+                    });
+                  }}
                   className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 focus:border-transparent bg-gray-50 focus:bg-white transition-all outline-none"
                 >
                   <option value="mesero">Mesero</option>
                   <option value="cocinero">Cocinero</option>
                   <option value="admin">Administrador</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Módulos Permitidos
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
+                  {AVAILABLE_MODULES.map((module) => (
+                    <label key={module.id} className="flex items-center space-x-2 cursor-pointer p-2 rounded-lg hover:bg-gray-50 border border-transparent hover:border-gray-100 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={formData.allowed_modules.includes(module.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setFormData({ ...formData, allowed_modules: [...formData.allowed_modules, module.id] });
+                          } else {
+                            setFormData({ ...formData, allowed_modules: formData.allowed_modules.filter(id => id !== module.id) });
+                          }
+                        }}
+                        className="rounded border-gray-300 text-orange-500 focus:ring-orange-500"
+                      />
+                      <span className="text-sm text-gray-700">{module.label}</span>
+                    </label>
+                  ))}
+                </div>
               </div>
 
               <div className="flex space-x-3 pt-4">

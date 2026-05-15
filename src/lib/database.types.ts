@@ -20,6 +20,7 @@ export interface Database {
           role: UserRole;
           is_active: boolean;
           created_at: string;
+          allowed_modules: string[];
         };
         Insert: {
           id: string;
@@ -27,6 +28,7 @@ export interface Database {
           role: UserRole;
           is_active?: boolean;
           created_at?: string;
+          allowed_modules?: string[];
         };
         Update: {
           id?: string;
@@ -34,6 +36,7 @@ export interface Database {
           role?: UserRole;
           is_active?: boolean;
           created_at?: string;
+          allowed_modules?: string[];
         };
       };
       categories: {

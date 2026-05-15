@@ -95,9 +95,14 @@ export default function Layout({ children, currentPage, onNavigate }: LayoutProp
     { id: 'config', label: 'Configuración', icon: <Settings className="w-5 h-5" />, roles: ['admin'] },
   ];
 
-  const filteredMenuItems = menuItems.filter(item =>
-    profile && item.roles.includes(profile.role)
-  );
+  const filteredMenuItems = menuItems.filter(item => {
+    if (!profile) return false;
+    // If user has customized allowed_modules, use them. Otherwise fallback to default roles.
+    if (profile.allowed_modules && profile.allowed_modules.length > 0) {
+      return profile.allowed_modules.includes(item.id);
+    }
+    return item.roles.includes(profile.role);
+  });
 
   const sidebarVariants = {
     open: { x: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 30 } },
