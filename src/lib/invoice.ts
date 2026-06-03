@@ -95,6 +95,7 @@ export const generateInvoicePDF = (data: InvoiceData): Promise<Blob> => {
     const dark: [number, number, number] = [30, 41, 59];
     const muted: [number, number, number] = [100, 116, 139];
     const light: [number, number, number] = [248, 250, 252];
+    const ticketFont = 'courier';
     const baseFontSize = data.fontSize || 10;
     const fontFamily = data.fontFamily || 'helvetica';
 
@@ -125,23 +126,26 @@ export const generateInvoicePDF = (data: InvoiceData): Promise<Blob> => {
         : 'Impuestos';
 
     if (isTicket) {
-      // Professional Ticket Design
-      doc.setTextColor(primary[0], primary[1], primary[2]);
-      doc.setFont(fontFamily, 'bold');
-      doc.setFontSize(baseFontSize + 4);
-      doc.text(restaurant, pageW / 2, 10, { align: 'center' });
+      // Professional Ticket Design - Receipt Style
+      const drawDashedLine = (y: number) => {
+        doc.setLineDashPattern([1, 1], 0);
+        doc.setDrawColor(0, 0, 0);
+        doc.setLineWidth(0.2);
+        doc.line(margin, y, pageW - margin, y);
+        doc.setLineDashPattern([], 0);
+      };
+
+      // Force Courier for Ticket for that authentic POS look
+      doc.setFont(ticketFont, 'bold');
+      doc.setTextColor(0, 0, 0);
+      doc.setFontSize(baseFontSize + 2);
+      
+      // Header: Company Info
+      doc.text(restaurant.toUpperCase(), pageW / 2, 10, { align: 'center' });
       
       let ty = 15;
-      if (data.businessId) {
-        doc.setTextColor(muted[0], muted[1], muted[2]);
-        doc.setFontSize(baseFontSize - 3);
-        doc.text(`RNC/ID: ${data.businessId}`, pageW / 2, ty, { align: 'center' });
-        ty += 4;
-      }
-
-      doc.setTextColor(dark[0], dark[1], dark[2]);
-      doc.setFont(fontFamily, 'normal');
-      doc.setFontSize(baseFontSize - 2);
+      doc.setFont(ticketFont, 'normal');
+      doc.setFontSize(baseFontSize - 1);
       if (data.address) {
         doc.text(data.address, pageW / 2, ty, { align: 'center', maxWidth: contentW });
         ty += 5;
@@ -150,86 +154,132 @@ export const generateInvoicePDF = (data: InvoiceData): Promise<Blob> => {
         doc.text(`Tel: ${data.phone}`, pageW / 2, ty, { align: 'center' });
         ty += 5;
       }
-      
-      doc.setDrawColor(200, 200, 200);
-      doc.setLineWidth(0.1);
-      doc.line(margin, ty, pageW - margin, ty);
-      ty += 6;
-      
-      doc.setFont(fontFamily, 'bold');
-      doc.setFontSize(baseFontSize);
-      doc.text(`FACTURA: ${data.saleNumber}`, margin, ty);
-      ty += 5;
-      doc.setFont(fontFamily, 'normal');
-      doc.setFontSize(baseFontSize - 1);
-      doc.text(`Fecha: ${data.date.toLocaleDateString()} ${data.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, margin, ty);
-      ty += 6;
-      
-      if (data.showCustomer !== false) {
-        doc.setFont(fontFamily, 'bold');
-        doc.text(`CLIENTE: ${data.customerName?.trim() || 'Consumidor Final'}`, margin, ty);
-        ty += 6;
-      }
-
-      autoTable(doc, {
-        head: [['Cant.', 'Descripción', 'Total']],
-        body: rows.map(r => [r[0], r[1], r[3]]),
-        startY: ty,
-        margin: { left: margin, right: margin },
-        tableWidth: contentW,
-        theme: 'plain',
-        styles: { fontSize: baseFontSize - 1, cellPadding: 1, textColor: dark },
-        headStyles: { fontStyle: 'bold', lineColor: [200, 200, 200], lineWidth: { bottom: 0.1 }, textColor: dark },
-        columnStyles: {
-          0: { cellWidth: 10, halign: 'center' },
-          1: { cellWidth: 'auto' },
-          2: { halign: 'right', cellWidth: 25 }
-        }
-      });
-      
-      ty = (doc as any).lastAutoTable.finalY + 5;
-      doc.line(margin, ty, pageW - margin, ty);
-      ty += 5;
-
-      const totalLabelX = margin;
-      const totalValueX = pageW - margin;
-
-      doc.setFontSize(baseFontSize - 1);
-      doc.text('Subtotal:', totalLabelX, ty);
-      doc.text(formatCurrency(data.subtotal, currency), totalValueX, ty, { align: 'right' });
-      ty += 4;
-      doc.text(taxLabel + ':', totalLabelX, ty);
-      doc.text(formatCurrency(data.tax, currency), totalValueX, ty, { align: 'right' });
-      ty += 6;
-
-      doc.setFontSize(baseFontSize + 2);
-      doc.setFont(fontFamily, 'bold');
-      doc.text('TOTAL:', totalLabelX, ty);
-      doc.text(formatCurrency(data.total, currency), totalValueX, ty, { align: 'right' });
-      ty += 8;
-
-      doc.setFont(fontFamily, 'normal');
-      doc.setFontSize(baseFontSize - 2);
-      doc.text(`Pago: ${paymentLabel}`, margin, ty);
-      ty += 4;
-      if (data.paymentMethod === 'cash' && data.moneyReceived) {
-        doc.text(`Efectivo: ${formatCurrency(data.moneyReceived, currency)}`, margin, ty);
-        ty += 4;
-        doc.text(`Cambio: ${formatCurrency(data.change || 0, currency)}`, margin, ty);
-        ty += 6;
-      }
 
       ty += 2;
-      doc.setFontSize(baseFontSize - 2);
-      const thanks = data.purchaseMessage?.trim() || '¡Gracias por su visita!';
-      doc.text(thanks, pageW / 2, ty, { align: 'center', maxWidth: contentW });
-      ty += 5;
+      drawDashedLine(ty);
+      ty += 6;
+
+      // Title: FACTURA DE VENTA
+      doc.setFont(ticketFont, 'bold');
+      doc.setFontSize(baseFontSize + 2);
+      doc.text('FACTURA DE VENTA', pageW / 2, ty, { align: 'center' });
+      ty += 4;
+      drawDashedLine(ty);
+      ty += 8;
+
+      // Details: Factura, Fecha, Vendedor, Método
+      doc.setFont(ticketFont, 'normal');
+      doc.setFontSize(baseFontSize - 1);
       
-      if (data.invoiceFooter) {
-        doc.setFontSize(baseFontSize - 3);
-        doc.text(data.invoiceFooter, pageW / 2, ty, { align: 'center', maxWidth: contentW });
-        ty += 5;
-      }
+      const detailsX1 = margin;
+      const detailsX2 = pageW - margin;
+
+      doc.text('Factura:', detailsX1, ty);
+      doc.setFont(ticketFont, 'bold');
+      doc.text(data.saleNumber, detailsX2, ty, { align: 'right' });
+      ty += 5;
+
+      doc.setFont(ticketFont, 'normal');
+      doc.text('Fecha:', detailsX1, ty);
+      const dateStr = data.date.toLocaleDateString('es-DO', { 
+        day: '2-digit', 
+        month: 'long', 
+        year: 'numeric' 
+      }) + ' a las ' + data.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      doc.text(dateStr, detailsX2, ty, { align: 'right' });
+      ty += 5;
+
+      doc.text('Vendedor:', detailsX1, ty);
+      doc.text(restaurant.toUpperCase(), detailsX2, ty, { align: 'right' });
+      ty += 5;
+
+      doc.text('Método:', detailsX1, ty);
+      doc.text(paymentLabel, detailsX2, ty, { align: 'right' });
+      ty += 5;
+
+      ty += 2;
+      drawDashedLine(ty);
+      ty += 6;
+
+      // Cliente Section
+      doc.setFont(ticketFont, 'bold');
+      doc.text('CLIENTE:', margin, ty);
+      ty += 5;
+      doc.setFont(ticketFont, 'normal');
+      doc.text(data.customerName?.toUpperCase() || 'CLIENTE GENERAL', margin, ty);
+      ty += 6;
+
+      drawDashedLine(ty);
+      ty += 6;
+
+      // Table Headers
+      doc.setFont(ticketFont, 'bold');
+      doc.text('DESCRIPCIÓN', margin, ty);
+      doc.text('CT', pageW - margin - 25, ty, { align: 'center' });
+      doc.text('TOTAL', pageW - margin, ty, { align: 'right' });
+      ty += 4;
+      drawDashedLine(ty);
+      ty += 6;
+
+      // Items
+      data.items.forEach((item) => {
+        const qty = item.quantity;
+        const unit = item.price;
+        const line = item.lineTotal ?? unit * qty;
+
+        doc.setFont(ticketFont, 'bold');
+        doc.text(item.name.toLowerCase(), margin, ty);
+        
+        doc.setFont(ticketFont, 'normal');
+        doc.text(String(qty), pageW - margin - 25, ty, { align: 'center' });
+        doc.text(formatCurrency(line, currency), pageW - margin, ty, { align: 'right' });
+        ty += 4;
+        
+        doc.setFontSize(baseFontSize - 2);
+        doc.text(`${qty} x ${formatCurrency(unit, currency)}`, margin, ty);
+        ty += 6;
+        doc.setFontSize(baseFontSize - 1);
+      });
+
+      drawDashedLine(ty);
+      ty += 6;
+
+      // Totals
+      doc.text('Subtotal:', margin, ty);
+      doc.text(formatCurrency(data.subtotal, currency), pageW - margin, ty, { align: 'right' });
+      ty += 5;
+
+      const currentTaxRate = data.taxRatePercent ?? (data.subtotal > 0 ? (data.tax / data.subtotal) * 100 : 18);
+      doc.text(`ITBIS (${currentTaxRate.toFixed(0)}%):`, margin, ty);
+      doc.text(formatCurrency(data.tax, currency), pageW - margin, ty, { align: 'right' });
+      ty += 5;
+
+      drawDashedLine(ty);
+      ty += 6;
+
+      // GRAND TOTAL
+      doc.setFontSize(baseFontSize + 2);
+      doc.setFont(ticketFont, 'bold');
+      doc.text('TOTAL:', margin, ty);
+      doc.text(formatCurrency(data.total, currency), pageW - margin, ty, { align: 'right' });
+      ty += 8;
+
+      drawDashedLine(ty);
+      ty += 8;
+
+      // Footer
+      doc.setFontSize(baseFontSize);
+      doc.setFont(ticketFont, 'bold');
+      const thanks = data.purchaseMessage?.toUpperCase() || '¡GRACIAS POR SU COMPRA!';
+      doc.text(thanks, pageW / 2, ty, { align: 'center' });
+      ty += 8;
+      
+      doc.setFont(ticketFont, 'normal');
+      doc.setFontSize(baseFontSize - 4);
+      doc.setTextColor(150, 150, 150);
+      const footerMsg = (data.invoiceFooter || 'SISTEMA DE VENTAS POS - BNX').toUpperCase();
+      doc.text(footerMsg, pageW / 2, ty, { align: 'center' });
+      ty += 5;
 
     } else {
       // Professional A4/Letter Design with Templates
