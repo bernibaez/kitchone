@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { useNotification } from '../contexts/NotificationContext';
-import { Plus, Minus, Trash2, ShoppingCart, Search, X, CreditCard, DollarSign, Smartphone, Eye } from 'lucide-react';
+import { Plus, Minus, Trash2, ShoppingCart, Search, X, CreditCard, DollarSign, Smartphone, Eye, Lock, Unlock } from 'lucide-react';
 import { generateInvoicePDF, type InvoiceItem } from '../lib/invoice';
 
 interface Dish {
@@ -99,10 +99,176 @@ export default function Sales({ onNavigate }: SalesProps) {
     items: Array<{ name: string; price: number; percentage: number; quantity: number; dish_id: string }>;
   } | null>(null);
 
+  // Cash management states
+  const [isCashOpen, setIsCashOpen] = useState(false);
+  const [currentCashOpening, setCurrentCashOpening] = useState<any>(null);
+  const [showOpenCashModal, setShowOpenCashModal] = useState(false);
+  const [showCloseCashModal, setShowCloseCashModal] = useState(false);
+  const [openingAmount, setOpeningAmount] = useState<string>('');
+  const [openingNotes, setOpeningNotes] = useState<string>('');
+  const [closingNotes, setClosingNotes] = useState<string>('');
+
 
   useEffect(() => {
     loadDishes();
+    checkCashStatus();
   }, []);
+
+  const checkCashStatus = async () => {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const { data, error } = await supabase
+        .from('cash_openings')
+        .select('*')
+        .gte('opened_at', today)
+        .order('opened_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+
+      // Check if there's an opening that hasn't been closed yet
+      if (data && data.length > 0) {
+        const opening = data[0];
+        const { data: closingData, error: closingError } = await supabase
+          .from('cash_closings')
+          .select('*')
+          .eq('opening_id', opening.id)
+          .single();
+
+        if (closingError && closingError.code !== 'PGRST116') {
+          throw closingError;
+        }
+
+        if (!closingData) {
+          setIsCashOpen(true);
+          setCurrentCashOpening(opening);
+        } else {
+          setIsCashOpen(false);
+          setCurrentCashOpening(null);
+        }
+      } else {
+        setIsCashOpen(false);
+        setCurrentCashOpening(null);
+      }
+    } catch (error) {
+      console.error('Error checking cash status:', error);
+    }
+  };
+
+  const handleOpenCash = async () => {
+    try {
+      const amount = parseMoneyInput(openingAmount);
+
+      const { data: openingNumData, error: openingNumError } = await supabase
+        .rpc('get_next_cash_opening_number');
+
+      if (openingNumError) throw openingNumError;
+
+      const { data, error } = await supabase
+        .from('cash_openings')
+        .insert({
+          opening_number: openingNumData,
+          opening_amount: amount,
+          notes: openingNotes || null,
+          opened_by: user?.id,
+        } as any)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      setIsCashOpen(true);
+      setCurrentCashOpening(data);
+      setShowOpenCashModal(false);
+      setOpeningAmount('');
+      setOpeningNotes('');
+
+      showNotification({
+        type: 'success',
+        title: 'Caja abierta',
+        message: `Caja abierta con ${formatMoney(amount)}`,
+      });
+    } catch (error: any) {
+      console.error('Error opening cash:', error);
+      showNotification({
+        type: 'error',
+        title: 'Error',
+        message: `No se pudo abrir la caja: ${error.message}`,
+      });
+    }
+  };
+
+  const handleCloseCash = async () => {
+    try {
+      if (!currentCashOpening) {
+        showNotification({
+          type: 'error',
+          title: 'Error',
+          message: 'No hay una caja abierta para cerrar',
+        });
+        return;
+      }
+
+      // Calculate sales for today
+      const today = new Date().toISOString().split('T')[0];
+      const { data: salesData, error: salesError } = await supabase
+        .from('sales')
+        .select('total, payment_method')
+        .gte('created_at', today);
+
+      if (salesError) throw salesError;
+
+      const totalSales = (salesData || []).reduce((sum: number, sale: any) => sum + (sale.total || 0), 0);
+      const cashAmount = (salesData || []).filter((s: any) => s.payment_method === 'cash').reduce((sum: number, s: any) => sum + (s.total || 0), 0);
+      const transactionAmount = (salesData || []).filter((s: any) => s.payment_method === 'transaction').reduce((sum: number, s: any) => sum + (s.total || 0), 0);
+      const cardAmount = (salesData || []).filter((s: any) => s.payment_method === 'card').reduce((sum: number, s: any) => sum + (s.total || 0), 0);
+
+      const expectedCash = currentCashOpening.opening_amount + cashAmount;
+      const difference = 0; // Will be calculated if user inputs actual cash count
+
+      const { data: closingNumData, error: closingNumError } = await supabase
+        .rpc('get_next_cash_closing_number');
+
+      if (closingNumError) throw closingNumError;
+
+      const { error } = await supabase
+        .from('cash_closings')
+        .insert({
+          closing_number: closingNumData,
+          opening_id: currentCashOpening.id,
+          total_sales: totalSales,
+          cash_amount: cashAmount,
+          transaction_amount: transactionAmount,
+          card_amount: cardAmount,
+          expected_cash: expectedCash,
+          difference: difference,
+          notes: closingNotes || null,
+          closed_by: user?.id,
+        } as any)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      setIsCashOpen(false);
+      setCurrentCashOpening(null);
+      setShowCloseCashModal(false);
+      setClosingNotes('');
+
+      showNotification({
+        type: 'success',
+        title: 'Caja cerrada',
+        message: `Cierre de caja ${closingNumData} registrado exitosamente`,
+      });
+    } catch (error: any) {
+      console.error('Error closing cash:', error);
+      showNotification({
+        type: 'error',
+        title: 'Error',
+        message: `No se pudo cerrar la caja: ${error.message}`,
+      });
+    }
+  };
 
   const loadDishes = async () => {
     try {
@@ -576,15 +742,37 @@ export default function Sales({ onNavigate }: SalesProps) {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-gray-800">Punto de Venta</h1>
-          <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
-            <Search className="w-5 h-5 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Buscar platillo..."
-              className="bg-transparent outline-none text-gray-700 w-64"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
+          <div className="flex items-center gap-4">
+            {/* Cash Management */}
+            <div className="flex items-center gap-2">
+              {isCashOpen ? (
+                <button
+                  onClick={() => setShowCloseCashModal(true)}
+                  className="flex items-center gap-2 bg-red-50 text-red-600 px-4 py-2 rounded-lg hover:bg-red-100 transition-colors"
+                >
+                  <Unlock className="w-5 h-5" />
+                  <span className="font-medium">Cerrar Caja</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowOpenCashModal(true)}
+                  className="flex items-center gap-2 bg-green-50 text-green-600 px-4 py-2 rounded-lg hover:bg-green-100 transition-colors"
+                >
+                  <Lock className="w-5 h-5" />
+                  <span className="font-medium">Abrir Caja</span>
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+              <Search className="w-5 h-5 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Buscar platillo..."
+                className="bg-transparent outline-none text-gray-700 w-64"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -1049,6 +1237,132 @@ export default function Sales({ onNavigate }: SalesProps) {
                 >
                   Agregar al Carrito
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Open Cash Modal */}
+      {showOpenCashModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl w-full max-w-md">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-800">Abrir Caja</h2>
+                <button
+                  onClick={() => setShowOpenCashModal(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Monto inicial
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step={0.01}
+                    placeholder="0.00"
+                    value={openingAmount}
+                    onChange={(e) => setOpeningAmount(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-lg font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Notas (opcional)
+                  </label>
+                  <textarea
+                    placeholder="Agregar notas sobre la apertura de caja..."
+                    value={openingNotes}
+                    onChange={(e) => setOpeningNotes(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 resize-none"
+                    rows={3}
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    onClick={() => setShowOpenCashModal(false)}
+                    className="flex-1 px-4 py-2 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleOpenCash}
+                    className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                  >
+                    Abrir Caja
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Close Cash Modal */}
+      {showCloseCashModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-800">Cerrar Caja</h2>
+                <button
+                  onClick={() => setShowCloseCashModal(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-sm text-gray-600 mb-2">Apertura de caja:</p>
+                  <p className="font-bold text-gray-800">{currentCashOpening?.opening_number}</p>
+                  <p className="text-sm text-gray-600 mt-2">Monto inicial: {formatMoney(currentCashOpening?.opening_amount || 0)}</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Notas (opcional)
+                  </label>
+                  <textarea
+                    placeholder="Agregar notas sobre el cierre de caja..."
+                    value={closingNotes}
+                    onChange={(e) => setClosingNotes(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 resize-none"
+                    rows={3}
+                  />
+                </div>
+
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <p className="text-sm text-yellow-800">
+                    Al cerrar la caja, se calculará automáticamente el total de ventas del día por método de pago.
+                  </p>
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    onClick={() => setShowCloseCashModal(false)}
+                    className="flex-1 px-4 py-2 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleCloseCash}
+                    className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                  >
+                    Cerrar Caja
+                  </button>
+                </div>
               </div>
             </div>
           </div>

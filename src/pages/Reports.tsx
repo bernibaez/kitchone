@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { 
-  TrendingUp, 
-  DollarSign, 
-  UtensilsCrossed, 
+import { useConfig } from '../contexts/ConfigContext';
+import { useNotification } from '../contexts/NotificationContext';
+import {
+  TrendingUp,
+  DollarSign,
+  UtensilsCrossed,
   FileText,
   FileSpreadsheet,
   Filter,
   ShoppingCart,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Download,
+  Lock,
+  Calendar,
+  Phone,
+  CreditCard
 } from 'lucide-react';
 import {
   LineChart,
@@ -66,9 +73,31 @@ interface ReportStats {
   }>;
 }
 
+interface CashClosing {
+  id: string;
+  closing_number: string;
+  opening_id: string;
+  total_sales: number;
+  cash_amount: number;
+  transaction_amount: number;
+  card_amount: number;
+  expected_cash: number;
+  difference: number;
+  notes: string | null;
+  closed_at: string;
+  closed_by: string;
+  cash_opening?: {
+    opening_number: string;
+    opening_amount: number;
+    opened_at: string;
+  };
+}
+
 const COLORS = ['#f97316', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444'];
 
 export default function Reports() {
+  const { formatMoney, config } = useConfig();
+  const { showNotification } = useNotification();
   const [stats, setStats] = useState<ReportStats>({
     totalSales: 0,
     totalExpenses: 0,
@@ -80,14 +109,37 @@ export default function Reports() {
     hourlySales: [],
     salesHistory: [],
   });
+  const [cashClosings, setCashClosings] = useState<CashClosing[]>([]);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<'day' | 'week' | 'month' | 'year'>('month');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
-  const [reportType, setReportType] = useState<'overview' | 'sales' | 'products' | 'analytics'>('overview');
+  const [reportType, setReportType] = useState<'overview' | 'sales' | 'products' | 'analytics' | 'cash-closings'>('overview');
+
+  const loadCashClosings = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('cash_closings')
+        .select(`
+          *,
+          cash_opening (
+            opening_number,
+            opening_amount,
+            opened_at
+          )
+        `)
+        .order('closed_at', { ascending: false });
+
+      if (error) throw error;
+      setCashClosings(data || []);
+    } catch (error) {
+      console.error('Error loading cash closings:', error);
+    }
+  };
 
   useEffect(() => {
     loadReports();
+    loadCashClosings();
   }, [period, startDate, endDate]);
 
   const loadReports = async () => {
@@ -255,6 +307,132 @@ export default function Reports() {
       console.error('Error loading reports:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const generateClosingPDF = async (closing: CashClosing) => {
+    try {
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 15;
+      let yPos = margin;
+
+      // Header
+      doc.setFontSize(20);
+      doc.setTextColor(0, 0, 0);
+      doc.text('Cierre de Caja', margin, yPos);
+      yPos += 10;
+
+      // Restaurant name
+      doc.setFontSize(12);
+      doc.text(config?.restaurant_name || 'Restaurante', margin, yPos);
+      yPos += 8;
+
+      // Closing number and date
+      doc.setFontSize(10);
+      doc.setTextColor(100, 100, 100);
+      doc.text(`Número: ${closing.closing_number}`, margin, yPos);
+      yPos += 6;
+      const date = new Date(closing.closed_at).toLocaleDateString('es-ES', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      doc.text(`Fecha: ${date}`, margin, yPos);
+      yPos += 6;
+      if (closing.cash_opening) {
+        doc.text(`Apertura: ${closing.cash_opening.opening_number}`, margin, yPos);
+        yPos += 6;
+      }
+      yPos += 10;
+
+      // Sales Summary Table
+      doc.setFontSize(14);
+      doc.setTextColor(0, 0, 0);
+      doc.text('Resumen de Ventas', margin, yPos);
+      yPos += 8;
+
+      autoTable(doc, {
+        startY: yPos,
+        head: [['Método de Pago', 'Monto']],
+        body: [
+          ['Efectivo', formatMoney(closing.cash_amount)],
+          ['Transferencia', formatMoney(closing.transaction_amount)],
+          ['Tarjeta', formatMoney(closing.card_amount)],
+          ['Total Ventas', formatMoney(closing.total_sales)],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [249, 115, 22], textColor: [255, 255, 255] },
+        columnStyles: {
+          0: { cellWidth: 80 },
+          1: { cellWidth: 60, halign: 'right' },
+        },
+      });
+
+      yPos = (doc as any).lastAutoTable.finalY + 15;
+
+      // Cash Summary
+      doc.setFontSize(14);
+      doc.text('Resumen de Efectivo', margin, yPos);
+      yPos += 8;
+
+      autoTable(doc, {
+        startY: yPos,
+        head: [['Concepto', 'Monto']],
+        body: [
+          ['Fondo Inicial', formatMoney(closing.cash_opening?.opening_amount || 0)],
+          ['Ventas en Efectivo', formatMoney(closing.cash_amount)],
+          ['Efectivo Esperado', formatMoney(closing.expected_cash)],
+          ['Diferencia', formatMoney(closing.difference)],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [249, 115, 22], textColor: [255, 255, 255] },
+        columnStyles: {
+          0: { cellWidth: 80 },
+          1: { cellWidth: 60, halign: 'right' },
+        },
+      });
+
+      yPos = (doc as any).lastAutoTable.finalY + 15;
+
+      // Notes if present
+      if (closing.notes) {
+        doc.setFontSize(12);
+        doc.text('Notas:', margin, yPos);
+        yPos += 6;
+        doc.setFontSize(10);
+        doc.setTextColor(100, 100, 100);
+        const splitNotes = doc.splitTextToSize(closing.notes, pageWidth - 2 * margin);
+        doc.text(splitNotes, margin, yPos);
+      }
+
+      // Footer
+      doc.setFontSize(8);
+      doc.setTextColor(150, 150, 150);
+      doc.text(
+        `Generado por Kitch One - ${new Date().toLocaleString('es-ES')}`,
+        margin,
+        pageHeight - 10
+      );
+
+      // Save PDF
+      doc.save(`cierre-caja-${closing.closing_number}.pdf`);
+
+      showNotification({
+        type: 'success',
+        title: 'PDF descargado',
+        message: 'El reporte de cierre de caja se ha descargado exitosamente',
+      });
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      showNotification({
+        type: 'error',
+        title: 'Error',
+        message: 'No se pudo generar el PDF',
+      });
     }
   };
 
@@ -466,6 +644,7 @@ export default function Reports() {
               <option value="sales">Análisis de Ventas</option>
               <option value="products">Productos</option>
               <option value="analytics">Análisis Avanzado</option>
+              <option value="cash-closings">Cierres de Caja</option>
             </select>
           </div>
 
@@ -803,6 +982,108 @@ export default function Reports() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Cash Closings Section */}
+      {reportType === 'cash-closings' && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-2">
+              <Lock className="w-5 h-5 text-orange-500" />
+              <h3 className="text-lg font-semibold text-gray-900">Cierres de Caja</h3>
+            </div>
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <Calendar className="w-4 h-4" />
+              <span>Historial completo</span>
+            </div>
+          </div>
+
+          {cashClosings.length === 0 ? (
+            <div className="text-center py-12 text-gray-500">
+              <Lock className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+              <p>No hay cierres de caja registrados</p>
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              {cashClosings.map((closing) => (
+                <div
+                  key={closing.id}
+                  className="bg-gray-50 rounded-xl border border-gray-200 p-6 hover:shadow-md transition-shadow"
+                >
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <Lock className="w-5 h-5 text-orange-500" />
+                        <h4 className="text-lg font-bold text-gray-800">{closing.closing_number}</h4>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-500">
+                        <Calendar className="w-4 h-4" />
+                        {new Date(closing.closed_at).toLocaleDateString('es-ES', {
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </div>
+                      {closing.cash_opening && (
+                        <p className="text-sm text-gray-500 mt-1">
+                          Apertura: {closing.cash_opening.opening_number}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => generateClosingPDF(closing)}
+                      className="flex items-center gap-2 bg-orange-50 text-orange-600 px-4 py-2 rounded-lg hover:bg-orange-100 transition-colors"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span className="font-medium">Descargar PDF</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 pt-4 border-t border-gray-200">
+                    <div className="bg-green-50 rounded-lg p-3">
+                      <div className="flex items-center gap-2 text-green-600 mb-1">
+                        <DollarSign className="w-4 h-4" />
+                        <span className="text-xs font-medium">Efectivo</span>
+                      </div>
+                      <p className="text-lg font-bold text-green-700">{formatMoney(closing.cash_amount)}</p>
+                    </div>
+                    <div className="bg-blue-50 rounded-lg p-3">
+                      <div className="flex items-center gap-2 text-blue-600 mb-1">
+                        <Phone className="w-4 h-4" />
+                        <span className="text-xs font-medium">Transferencia</span>
+                      </div>
+                      <p className="text-lg font-bold text-blue-700">{formatMoney(closing.transaction_amount)}</p>
+                    </div>
+                    <div className="bg-purple-50 rounded-lg p-3">
+                      <div className="flex items-center gap-2 text-purple-600 mb-1">
+                        <CreditCard className="w-4 h-4" />
+                        <span className="text-xs font-medium">Tarjeta</span>
+                      </div>
+                      <p className="text-lg font-bold text-purple-700">{formatMoney(closing.card_amount)}</p>
+                    </div>
+                    <div className="bg-orange-50 rounded-lg p-3">
+                      <div className="flex items-center gap-2 text-orange-600 mb-1">
+                        <DollarSign className="w-4 h-4" />
+                        <span className="text-xs font-medium">Total</span>
+                      </div>
+                      <p className="text-lg font-bold text-orange-700">{formatMoney(closing.total_sales)}</p>
+                    </div>
+                  </div>
+
+                  {closing.notes && (
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                      <p className="text-sm text-gray-600">
+                        <span className="font-medium">Notas:</span> {closing.notes}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>
