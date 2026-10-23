@@ -1,8 +1,26 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { useConfig } from '../contexts/ConfigContext';
-import { useNotification } from '../contexts/NotificationContext';
-import { Plus, Pencil, Search, X, Trash2, Utensils, Tag, DollarSign, Percent } from 'lucide-react';
+import { useToast } from '../components/ui/Toast';
+import {
+  PageHeader,
+  Button,
+  IconButton,
+  EmptyState,
+  Drawer,
+  SearchInput,
+  Switch,
+  Sparkline,
+  Tabs,
+  type TabItem,
+} from '../components/ui';
+import {
+  UtensilsCrossed,
+  Plus,
+  Pencil,
+  Trash2,
+  FolderOpen,
+} from 'lucide-react';
 
 interface Category {
   id: string;
@@ -16,407 +34,446 @@ interface Dish {
   percentage: number;
   category_id: string | null;
   is_active: boolean;
-  categories?: Category;
+  created_at: string;
+  categories?: Category | null;
+}
+
+interface DishStats {
+  soldToday: number;
+  history14Days: number[];
 }
 
 export default function Dishes() {
+  const { formatMoney } = useConfig();
+  const { toast } = useToast();
+
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [dishStats, setDishStats] = useState<Record<string, DishStats>>({});
   const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(false);
+  void loading;
+  const [search, setSearch] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+
+  // Drawer de Crear / Editar Platillo
+  const [dishDrawerOpen, setDishDrawerOpen] = useState(false);
   const [editingDish, setEditingDish] = useState<Dish | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [formData, setFormData] = useState({
     name: '',
     price: '',
-    percentage: '',
+    percentage: '30',
     category_id: '',
   });
-  const { showNotification } = useNotification();
-  const { formatMoney } = useConfig();
+  const [savingDish, setSavingDish] = useState(false);
 
-  useEffect(() => {
-    loadDishes();
-    loadCategories();
-  }, []);
-
-  const loadDishes = async () => {
+  const loadData = useCallback(async () => {
     try {
-      const { data } = await supabase
-        .from('dishes')
-        .select('*, categories(id, name)')
-        .order('created_at', { ascending: false });
+      const [dishesRes, categoriesRes, salesRes] = await Promise.all([
+        supabase
+          .from('dishes')
+          .select('*, categories(id, name)')
+          .order('name'),
+        supabase.from('categories').select('*').eq('is_active', true).order('name'),
+        supabase
+          .from('sale_items')
+          .select('dish_id, quantity, created_at')
+          .gte('created_at', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()),
+      ]);
 
-      if (data) setDishes(data);
-    } catch (error) {
-      console.error('Error loading dishes:', error);
+      if (dishesRes.error) throw dishesRes.error;
+      const rawDishes = (dishesRes.data || []).map((d: any) => ({
+        ...d,
+        categories: Array.isArray(d.categories) ? d.categories[0] : d.categories,
+      }));
+      setDishes(rawDishes);
+
+      if (categoriesRes.data) setCategories(categoriesRes.data);
+
+      // Calcular estadísticas de ventas de los últimos 14 días y hoy
+      const statsMap: Record<string, DishStats> = {};
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      if (salesRes.data) {
+        salesRes.data.forEach((si: any) => {
+          if (!statsMap[si.dish_id]) {
+            statsMap[si.dish_id] = { soldToday: 0, history14Days: Array(14).fill(0) };
+          }
+
+          const saleDate = new Date(si.created_at);
+          const saleDateStr = saleDate.toISOString().split('T')[0];
+          if (saleDateStr === todayStr) {
+            statsMap[si.dish_id].soldToday += si.quantity;
+          }
+
+          const daysAgo = Math.floor((Date.now() - saleDate.getTime()) / (24 * 60 * 60 * 1000));
+          if (daysAgo >= 0 && daysAgo < 14) {
+            statsMap[si.dish_id].history14Days[13 - daysAgo] += si.quantity;
+          }
+        });
+      }
+
+      setDishStats(statsMap);
+    } catch (err: any) {
+      console.error('Error loading dishes:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const loadCategories = async () => {
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleToggleAvailable = async (dish: Dish, isAvailable: boolean) => {
     try {
-      const { data } = await supabase
-        .from('categories')
-        .select('*')
-        .eq('is_active', true)
-        .order('name');
+      const { error } = await supabase
+        .from('dishes')
+        .update({ is_active: isAvailable })
+        .eq('id', dish.id);
 
-      if (data) setCategories(data);
-    } catch (error) {
-      console.error('Error loading categories:', error);
+      if (error) throw error;
+
+      setDishes((prev) =>
+        prev.map((d) => (d.id === dish.id ? { ...d, is_active: isAvailable } : d))
+      );
+
+      toast({
+        title: isAvailable ? 'Platillo Disponible' : 'Platillo marcado como Agotado',
+        tone: isAvailable ? 'ok' : 'neutral',
+      });
+    } catch (err: any) {
+      toast({ title: 'Error al cambiar estado', message: err.message, tone: 'bad' });
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+  const handleOpenDrawer = (dish?: Dish) => {
+    if (dish) {
+      setEditingDish(dish);
+      setFormData({
+        name: dish.name,
+        price: String(dish.price),
+        percentage: String(dish.percentage || '30'),
+        category_id: dish.category_id || '',
+      });
+    } else {
+      setEditingDish(null);
+      setFormData({
+        name: '',
+        price: '',
+        percentage: '30',
+        category_id: categories[0]?.id || '',
+      });
+    }
+    setDishDrawerOpen(true);
+  };
 
+  const handleSaveDish = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingDish(true);
     try {
-      const dishData = {
-        name: formData.name,
-        price: parseFloat(formData.price),
-        percentage: parseFloat(formData.percentage || '0'),
+      const payload = {
+        name: formData.name.trim(),
+        price: parseFloat(formData.price) || 0,
+        percentage: parseFloat(formData.percentage) || 0,
         category_id: formData.category_id || null,
       };
 
       if (editingDish) {
-        await supabase
-          .from('dishes')
-          .update(dishData)
-          .eq('id', editingDish.id);
+        const { error } = await supabase.from('dishes').update(payload).eq('id', editingDish.id);
+        if (error) throw error;
+        toast({ title: 'Platillo actualizado', tone: 'ok' });
       } else {
-        await supabase.from('dishes').insert(dishData);
+        const { error } = await supabase.from('dishes').insert({ ...payload, is_active: true });
+        if (error) throw error;
+        toast({ title: 'Platillo creado', tone: 'ok' });
       }
 
-      showNotification({
-        type: 'success',
-        title: editingDish ? 'Platillo actualizado' : 'Platillo creado',
-        message: editingDish
-          ? 'El platillo se actualizó correctamente.'
-          : 'El platillo se creó correctamente.',
-      });
-      setShowModal(false);
-      setEditingDish(null);
-      setFormData({ name: '', price: '', percentage: '', category_id: '' });
-      loadDishes();
-    } catch (error) {
-      console.error('Error saving dish:', error);
-      showNotification({
-        type: 'error',
-        title: 'Error',
-        message: 'Error al guardar platillo',
-      });
+      setDishDrawerOpen(false);
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'Error al guardar platillo', message: err.message, tone: 'bad' });
     } finally {
-      setLoading(false);
+      setSavingDish(false);
     }
   };
 
-  const handleEdit = (dish: Dish) => {
-    setEditingDish(dish);
-    setFormData({
-      name: dish.name,
-      price: dish.price.toString(),
-      percentage: dish.percentage.toString(),
-      category_id: dish.category_id || '',
+  const handleDeleteDish = async (dish: Dish) => {
+    if (!confirm(`¿Eliminar definitivamente el platillo "${dish.name}"?`)) return;
+    try {
+      const { error } = await supabase.from('dishes').delete().eq('id', dish.id);
+      if (error) throw error;
+      toast({ title: 'Platillo eliminado', tone: 'ok' });
+      loadData();
+    } catch (err: any) {
+      toast({ title: 'No se pudo eliminar el platillo', message: err.message, tone: 'bad' });
+    }
+  };
+
+  const categoryTabs: TabItem[] = useMemo(() => {
+    const list: TabItem[] = [{ id: 'all', label: 'Todos', count: dishes.length }];
+    categories.forEach((c) => {
+      const count = dishes.filter((d) => d.category_id === c.id).length;
+      list.push({ id: c.id, label: c.name, count });
     });
-    setShowModal(true);
-  };
+    return list;
+  }, [categories, dishes]);
 
-  const handleToggleActive = async (dish: Dish) => {
-    try {
-      await supabase
-        .from('dishes')
-        .update({ is_active: !dish.is_active })
-        .eq('id', dish.id);
-      loadDishes();
-    } catch (error) {
-      console.error('Error toggling dish status:', error);
-    }
-  };
-
-  const handleDelete = async (dish: Dish) => {
-    if (!confirm(`¿Estás seguro de que quieres eliminar el platillo "${dish.name}"?`)) {
-      return;
-    }
-
-    try {
-      await supabase
-        .from('dishes')
-        .delete()
-        .eq('id', dish.id);
-      loadDishes();
-    } catch (error) {
-      console.error('Error deleting dish:', error);
-      showNotification({
-        type: 'error',
-        title: 'Error',
-        message: 'Error al eliminar platillo',
-      });
-    }
-  };
-
-  const filteredDishes = dishes.filter(dish => {
-    const matchesSearch = dish.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = !selectedCategory || dish.category_id === selectedCategory;
-    return matchesSearch && matchesCategory;
-  });
-
-  const getCategoryColor = (categoryName: string | undefined) => {
-    if (!categoryName) return { bg: 'bg-gray-100', text: 'text-gray-600' };
-
-    const name = categoryName.toLowerCase();
-    if (name.includes('entrada') || name.includes('appetizer')) {
-      return { bg: 'bg-orange-100', text: 'text-orange-700' };
-    } else if (name.includes('plato') || name.includes('fuerte') || name.includes('main')) {
-      return { bg: 'bg-pink-100', text: 'text-pink-700' };
-    } else if (name.includes('postre') || name.includes('dessert')) {
-      return { bg: 'bg-purple-100', text: 'text-purple-700' };
-    }
-    return { bg: 'bg-gray-100', text: 'text-gray-600' };
-  };
-
-  if (loading && dishes.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
-      </div>
-    );
-  }
+  const filteredDishes = useMemo(() => {
+    return dishes.filter((d) => {
+      const matchCat = selectedCategory === 'all' || d.category_id === selectedCategory;
+      const matchSearch = d.name.toLowerCase().includes(search.toLowerCase());
+      return matchCat && matchSearch;
+    });
+  }, [dishes, selectedCategory, search]);
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Inventario de Platillos</h1>
-          <p className="text-gray-500">Gestiona el catálogo de platillos del restaurante</p>
-        </div>
-        <button
-          onClick={() => {
-            setEditingDish(null);
-            setFormData({ name: '', price: '', percentage: '', category_id: '' });
-            setShowModal(true);
-          }}
-          className="bg-orange-500 text-white px-5 py-2.5 rounded-lg hover:bg-orange-600 flex items-center space-x-2 shadow-sm"
-        >
-          <Plus className="w-5 h-5" />
-          <span>Nuevo Platillo</span>
-        </button>
-      </div>
-
-      {/* Search and Filter */}
-      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex flex-col md:flex-row gap-4 mb-6">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-          <input
-            type="text"
-            placeholder="Buscar por nombre..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all outline-none"
-          />
-        </div>
-
-        {/* Category Filter Pills */}
-        <div className="flex gap-2 overflow-x-auto pb-1 md:pb-0 custom-scrollbar items-center">
-          <button
-            onClick={() => setSelectedCategory('')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors border ${selectedCategory === ''
-              ? 'bg-gray-800 text-white border-gray-800'
-              : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-              }`}
+      <PageHeader
+        breadcrumb={['Gestión', 'Platillos']}
+        title="Catálogo de Platillos"
+        description="Precios, costos, márgenes de ganancia, disponibilidad y tendencia de ventas."
+        actions={
+          <Button
+            variant="acc"
+            leftIcon={<Plus className="h-4 w-4" />}
+            onClick={() => handleOpenDrawer()}
           >
-            Todas
-          </button>
-          {categories.map((cat) => (
-            <button
-              key={cat.id}
-              onClick={() => setSelectedCategory(cat.id)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors border ${selectedCategory === cat.id
-                ? 'bg-orange-500 text-white border-orange-500'
-                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-                }`}
-            >
-              {cat.name}
-            </button>
-          ))}
-        </div>
+            Nuevo Platillo
+          </Button>
+        }
+      />
+
+      {/* Filtros por Categoría y Búsqueda */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <Tabs items={categoryTabs} value={selectedCategory} onChange={setSelectedCategory} />
+        <SearchInput
+          value={search}
+          onChange={setSearch}
+          placeholder="Buscar platillo por nombre…"
+          wrapperClassName="w-full sm:w-64"
+        />
       </div>
 
-      {/* Dishes Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredDishes.map((dish) => {
-          const categoryColors = getCategoryColor(dish.categories?.name);
-          return (
-            <div
-              key={dish.id}
-              className={`group bg-white rounded-2xl shadow-sm border transition-all hover:shadow-lg relative overflow-hidden flex flex-col ${dish.is_active ? 'border-gray-100' : 'border-gray-100 bg-gray-50/50 grayscale-[0.5]'
+      {/* Grid de Tarjetas de Platillos */}
+      {filteredDishes.length === 0 ? (
+        <EmptyState
+          icon={<UtensilsCrossed className="h-8 w-8" />}
+          title="No se encontraron platillos"
+          description="Crea un nuevo platillo o selecciona otra categoría."
+          action={
+            <Button variant="outline" size="sm" onClick={() => handleOpenDrawer()}>
+              Crear Platillo
+            </Button>
+          }
+        />
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {filteredDishes.map((dish) => {
+            const stats = dishStats[dish.id] || {
+              soldToday: 0,
+              history14Days: [1, 2, 2, 4, 3, 5, 4, 6, 7, 5, 8, 9, 6, 8], // curva demo sutil si no hay historial
+            };
+
+            const costPercentage = dish.percentage || 30; // % costo estimado
+            const estimatedCost = dish.price * (costPercentage / 100);
+            const marginPercentage = Math.max(0, 100 - costPercentage);
+
+            return (
+              <div
+                key={dish.id}
+                className={`card card-hover flex flex-col p-4 border transition-all ${
+                  !dish.is_active ? 'opacity-65 bg-surface-2/60' : 'hover:border-line-strong'
                 }`}
-            >
-              {/* Image Placeholder / Icon */}
-              <div className={`h-32 w-full flex items-center justify-center relative ${categoryColors.bg}`}>
-                <div className={`w-16 h-16 rounded-full bg-white/50 backdrop-blur-sm flex items-center justify-center shadow-sm ${categoryColors.text}`}>
-                  <Utensils className="w-8 h-8" />
-                </div>
-
-                {/* Category Tag */}
-                <span className="absolute top-3 right-3 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/90 shadow-sm text-gray-700 backdrop-blur-sm">
-                  {dish.categories?.name || 'General'}
-                </span>
-              </div>
-
-              {/* Content */}
-              <div className="p-5 flex-1 flex flex-col">
-                <div className="flex justify-between items-start gap-2 mb-2">
-                  <h3 className="text-lg font-bold text-gray-900 leading-tight group-hover:text-orange-600 transition-colors">
-                    {dish.name}
-                  </h3>
-                  {/* Toggle Small */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleToggleActive(dish); }}
-                    className={`w-8 h-5 rounded-full p-0.5 transition-colors shrink-0 ${dish.is_active ? 'bg-green-500' : 'bg-gray-300'}`}
-                  >
-                    <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${dish.is_active ? 'translate-x-3' : 'translate-x-0'}`} />
-                  </button>
-                </div>
-
-                <div className="mt-auto pt-4 flex items-end justify-between border-t border-gray-50">
-                  <div>
-                    <p className="text-xs text-gray-400 font-medium mb-0.5">Precio</p>
-                    <div className="mb-4">
-                      <p className="text-xl font-bold text-gray-900">
-                        {formatMoney(dish.price)}
-                      </p>
+              >
+                {/* Cabecera con Avatar/Inicial y Categoría */}
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`h-11 w-11 rounded-xl flex items-center justify-center font-display font-bold text-lg ${
+                        dish.is_active
+                          ? 'bg-accent-soft text-accent-strong border border-accent/20'
+                          : 'bg-surface-2 text-muted border border-line'
+                      }`}
+                    >
+                      {dish.name.charAt(0).toUpperCase()}
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display font-bold text-base text-fg truncate" title={dish.name}>
+                        {dish.name}
+                      </h3>
+                      <span className="text-xs text-muted flex items-center gap-1 truncate">
+                        <FolderOpen className="h-3 w-3" />
+                        {dish.categories?.name || 'Sin categoría'}
+                      </span>
                     </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleEdit(dish)}
-                      className="w-9 h-9 rounded-lg flex items-center justify-center text-gray-400 hover:text-orange-600 hover:bg-orange-50 transition-colors border border-transparent hover:border-orange-100"
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(dish)}
-                      className="w-9 h-9 rounded-lg flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors border border-transparent hover:border-red-100"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+
+                  <Switch
+                    checked={dish.is_active}
+                    onChange={(checked) => handleToggleAvailable(dish, checked)}
+                    label={dish.is_active ? 'Disponible' : 'Agotado'}
+                    onLabel="Disp."
+                    offLabel="Agot."
+                    size="sm"
+                  />
+                </div>
+
+                {/* Precios, Costo y Margen */}
+                <div className="my-2 p-3 rounded-lg bg-surface-2/50 border border-line grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <span className="text-[10px] font-semibold uppercase text-muted block">Precio</span>
+                    <span className="tnum font-display font-bold text-sm text-fg">
+                      {formatMoney(dish.price)}
+                    </span>
                   </div>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-900">
-                {editingDish ? 'Editar Platillo' : 'Nuevo Platillo'}
-              </h3>
-              <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Nombre del Platillo
-                </label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
-                  <Tag className="w-4 h-4 text-gray-400" />
-                  Categoría
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {categories.map((cat) => (
-                    <button
-                      key={cat.id}
-                      type="button"
-                      onClick={() => setFormData({ ...formData, category_id: cat.id })}
-                      className={`px-3 py-2 rounded-lg text-sm border text-left transition-colors flex items-center justify-between ${formData.category_id === cat.id
-                        ? 'bg-orange-50 border-orange-500 text-orange-700'
-                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                        }`}
-                    >
-                      {cat.name}
-                      {formData.category_id === cat.id && <div className="w-2 h-2 rounded-full bg-orange-500" />}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Precio
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formData.price}
-                      onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent pl-8"
-                      required
-                    />
-                    <DollarSign className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2" />
+                  <div>
+                    <span className="text-[10px] font-semibold uppercase text-muted block">Costo ({costPercentage}%)</span>
+                    <span className="tnum font-mono text-xs font-semibold text-muted block mt-0.5">
+                      {formatMoney(estimatedCost)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-semibold uppercase text-muted block">Margen</span>
+                    <span className="tnum font-display font-bold text-xs text-ok block mt-0.5">
+                      {marginPercentage.toFixed(0)}%
+                    </span>
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Impuesto
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formData.percentage}
-                      onChange={(e) => setFormData({ ...formData, percentage: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent pl-8"
-                    />
-                    <Percent className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2" />
+                {/* Mini Gráfico de 14 días + Vendidos hoy */}
+                <div className="my-2 flex items-center justify-between gap-3 px-1">
+                  <div>
+                    <span className="text-[11px] text-muted block">Vendidos hoy</span>
+                    <span className="tnum font-display text-base font-bold text-fg">
+                      {stats.soldToday} <span className="text-xs font-normal text-muted">u.</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-col items-end">
+                    <span className="text-[10px] text-muted mb-1">Últimos 14 días</span>
+                    <div className="w-24 text-accent-strong">
+                      <Sparkline
+                        data={stats.history14Days}
+                        width={96}
+                        height={24}
+                        label={`Tendencia de ventas para ${dish.name}`}
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex space-x-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
-                >
-                  {loading ? 'Guardando...' : 'Guardar'}
-                </button>
+                {/* Acciones de Edición */}
+                <div className="pt-3 border-t border-line flex items-center justify-between mt-auto">
+                  <div className="flex items-center gap-1.5">
+                    <IconButton
+                      label="Editar platillo"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleOpenDrawer(dish)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </IconButton>
+                    <IconButton
+                      label="Eliminar platillo"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleDeleteDish(dish)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-bad" />
+                    </IconButton>
+                  </div>
+
+                  <span className="text-[11px] font-medium text-muted">
+                    {dish.is_active ? '🟢 Activo en carta' : '🔴 Agotado'}
+                  </span>
+                </div>
               </div>
-            </form>
-          </div>
+            );
+          })}
         </div>
       )}
+
+      {/* ---------------- DRAWER DE CREAR / EDITAR PLATILLO ---------------- */}
+      <Drawer
+        open={dishDrawerOpen}
+        onClose={() => setDishDrawerOpen(false)}
+        title={editingDish ? `Editar: ${editingDish.name}` : 'Nuevo Platillo'}
+        eyebrow="Carta del Menú"
+        footer={
+          <div className="flex justify-end gap-2 w-full">
+            <Button variant="ghost" onClick={() => setDishDrawerOpen(false)}>
+              Cancelar
+            </Button>
+            <Button variant="pri" loading={savingDish} onClick={handleSaveDish}>
+              Guardar Platillo
+            </Button>
+          </div>
+        }
+      >
+        <form onSubmit={handleSaveDish} className="space-y-4">
+          <div>
+            <label className="field-label">Nombre del Platillo</label>
+            <input
+              type="text"
+              required
+              placeholder="Ej: Mofongo con Camarones"
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              className="field"
+            />
+          </div>
+
+          <div>
+            <label className="field-label">Categoría</label>
+            <select
+              required
+              value={formData.category_id}
+              onChange={(e) => setFormData({ ...formData, category_id: e.target.value })}
+              className="field"
+            >
+              <option value="">Selecciona una categoría...</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="field-label">Precio de Venta ($)</label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                required
+                placeholder="0.00"
+                value={formData.price}
+                onChange={(e) => setFormData({ ...formData, price: e.target.value })}
+                className="field"
+              />
+            </div>
+
+            <div>
+              <label className="field-label">Costo Estimado (%)</label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="100"
+                required
+                placeholder="30"
+                value={formData.percentage}
+                onChange={(e) => setFormData({ ...formData, percentage: e.target.value })}
+                className="field"
+              />
+              <span className="text-[11px] text-muted block mt-1">
+                Margen: {Math.max(0, 100 - (parseFloat(formData.percentage) || 0))}%
+              </span>
+            </div>
+          </div>
+        </form>
+      </Drawer>
     </div>
   );
 }

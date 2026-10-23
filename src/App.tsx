@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import { AnimatePresence, MotionConfig } from 'framer-motion';
 import AnimatedPage from './components/AnimatedPage';
+import { ToastProvider } from './components/ui/Toast';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import { ConfigProvider } from './contexts/ConfigContext';
@@ -26,11 +27,8 @@ function AppContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-orange-50/30 flex items-center justify-center">
-        <div className="relative">
-          <div className="w-14 h-14 rounded-full border-[3px] border-orange-200 border-t-orange-500 animate-spin" />
-          <div className="absolute inset-0 w-14 h-14 rounded-full border-[3px] border-transparent border-b-amber-400 animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }} />
-        </div>
+      <div className="flex min-h-screen items-center justify-center bg-bg" role="status" aria-label="Cargando">
+        <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-line border-t-accent" />
       </div>
     );
   }
@@ -85,13 +83,17 @@ function AppContent() {
 
 function App() {
   return (
-    <AuthProvider>
-      <ConfigProvider>
-        <NotificationProvider>
-          <AppContent />
-        </NotificationProvider>
-      </ConfigProvider>
-    </AuthProvider>
+    <MotionConfig reducedMotion="user">
+      <AuthProvider>
+        <ConfigProvider>
+          <NotificationProvider>
+            <ToastProvider>
+              <AppContent />
+            </ToastProvider>
+          </NotificationProvider>
+        </ConfigProvider>
+      </AuthProvider>
+    </MotionConfig>
   );
 }
 

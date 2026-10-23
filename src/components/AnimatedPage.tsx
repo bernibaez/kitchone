@@ -7,9 +7,9 @@ interface AnimatedPageProps {
 }
 
 const animations = {
-  initial: { opacity: 0, y: 15 },
+  initial: { opacity: 0, y: 6 },
   animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: -15 },
+  exit: { opacity: 0, y: -4 },
 };
 
 export default function AnimatedPage({ children, className = '' }: AnimatedPageProps) {
@@ -19,7 +19,7 @@ export default function AnimatedPage({ children, className = '' }: AnimatedPageP
       initial="initial"
       animate="animate"
       exit="exit"
-      transition={{ duration: 0.3, ease: 'easeOut' }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
       className={className}
     >
       {children}

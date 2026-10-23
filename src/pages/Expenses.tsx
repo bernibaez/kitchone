@@ -1,8 +1,28 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { useNotification } from '../contexts/NotificationContext';
-import { Plus, Search, X } from 'lucide-react';
+import { useConfig } from '../contexts/ConfigContext';
+import { useToast } from '../components/ui/Toast';
+import {
+  PageHeader,
+  Button,
+  StatCard,
+  Panel,
+  Tag,
+  Drawer,
+  SearchInput,
+  DataTable,
+  type Column,
+  EmptyState,
+} from '../components/ui';
+import {
+  Plus,
+  DollarSign,
+  TrendingDown,
+  Receipt,
+  PieChart,
+  Calendar,
+} from 'lucide-react';
 
 interface Expense {
   id: string;
@@ -14,13 +34,28 @@ interface Expense {
   created_at: string;
 }
 
+const CATEGORIES = [
+  'Alimentos',
+  'Bebidas',
+  'Insumos',
+  'Mantenimiento',
+  'Personal',
+  'Servicios',
+  'Otros',
+];
+
 export default function Expenses() {
   const { user } = useAuth();
+  const { formatMoney } = useConfig();
+  const { toast } = useToast();
+
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [showDrawer, setShowDrawer] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [dateFilter, setDateFilter] = useState('');
+
   const [formData, setFormData] = useState({
     concept: '',
     amount: '',
@@ -28,11 +63,6 @@ export default function Expenses() {
     category: '',
     notes: '',
   });
-  const { showNotification } = useNotification();
-
-  useEffect(() => {
-    loadExpenses();
-  }, [dateFilter]);
 
   const loadExpenses = async () => {
     try {
@@ -45,36 +75,48 @@ export default function Expenses() {
         query = query.eq('date', dateFilter);
       }
 
-      const { data } = await query;
-
+      const { data, error } = await query;
+      if (error) throw error;
       if (data) setExpenses(data);
-    } catch (error) {
-      console.error('Error loading expenses:', error);
+    } catch (error: any) {
+      toast({ title: 'Error al cargar gastos', message: error.message, tone: 'bad' });
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    loadExpenses();
+  }, [dateFilter]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
+    const amountNum = parseFloat(formData.amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      toast({ title: 'Monto inválido', message: 'Ingresa un monto numérico positivo', tone: 'warn' });
+      return;
+    }
 
+    setSaving(true);
     try {
-      await supabase.from('expenses').insert({
-        concept: formData.concept,
-        amount: parseFloat(formData.amount),
+      const { error } = await supabase.from('expenses').insert({
+        concept: formData.concept.trim(),
+        amount: amountNum,
         date: formData.date,
         category: formData.category || null,
-        notes: formData.notes || null,
+        notes: formData.notes?.trim() || null,
         created_by: user?.id,
       });
 
-      showNotification({
-        type: 'success',
+      if (error) throw error;
+
+      toast({
         title: 'Gasto registrado',
-        message: 'El gasto se guardó correctamente.',
+        message: `${formData.concept} — ${formatMoney(amountNum)}`,
+        tone: 'ok',
       });
-      setShowModal(false);
+
+      setShowDrawer(false);
       setFormData({
         concept: '',
         amount: '',
@@ -83,216 +125,312 @@ export default function Expenses() {
         notes: '',
       });
       loadExpenses();
-    } catch (error) {
-      console.error('Error saving expense:', error);
-      showNotification({
-        type: 'error',
-        title: 'Error',
-        message: 'Error al guardar gasto',
-      });
+    } catch (error: any) {
+      toast({ title: 'Error al guardar gasto', message: error.message, tone: 'bad' });
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
-  const filteredExpenses = expenses.filter(expense =>
-    expense.concept.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  const totalExpenses = filteredExpenses.reduce((sum, exp) => sum + exp.amount, 0);
-
-  if (loading && expenses.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
-      </div>
+  const filteredExpenses = useMemo(() => {
+    const term = searchTerm.toLowerCase().trim();
+    if (!term) return expenses;
+    return expenses.filter(
+      (exp) =>
+        exp.concept.toLowerCase().includes(term) ||
+        (exp.category && exp.category.toLowerCase().includes(term)) ||
+        (exp.notes && exp.notes.toLowerCase().includes(term))
     );
-  }
+  }, [expenses, searchTerm]);
+
+  const totalAmount = useMemo(() => {
+    return filteredExpenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
+  }, [filteredExpenses]);
+
+  const averageAmount = useMemo(() => {
+    if (filteredExpenses.length === 0) return 0;
+    return totalAmount / filteredExpenses.length;
+  }, [totalAmount, filteredExpenses.length]);
+
+  const topCategory = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const exp of filteredExpenses) {
+      const cat = exp.category || 'Otros';
+      map[cat] = (map[cat] || 0) + exp.amount;
+    }
+    const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
+    return entries[0] ? `${entries[0][0]} (${formatMoney(entries[0][1])})` : 'Ninguna';
+  }, [filteredExpenses, formatMoney]);
+
+  const columns: Column<Expense>[] = [
+    {
+      key: 'date',
+      header: 'Fecha',
+      sortValue: (r: Expense) => r.date,
+      cell: (r: Expense) => (
+        <span className="text-xs font-mono tabular-nums text-fg">
+          {new Date(r.date + 'T00:00:00').toLocaleDateString()}
+        </span>
+      ),
+    },
+    {
+      key: 'concept',
+      header: 'Concepto',
+      sortValue: (r: Expense) => r.concept,
+      cell: (r: Expense) => (
+        <div className="flex flex-col">
+          <span className="font-semibold text-ink dark:text-line">{r.concept}</span>
+          {r.notes && (
+            <span className="text-xs text-muted truncate max-w-sm">{r.notes}</span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'category',
+      header: 'Categoría',
+      cell: (r: Expense) => (
+        <Tag tone={r.category === 'Alimentos' ? 'accent' : 'neutral'}>
+          {r.category || 'Sin categoría'}
+        </Tag>
+      ),
+    },
+    {
+      key: 'amount',
+      header: 'Monto',
+      align: 'right',
+      sortValue: (r: Expense) => r.amount,
+      cell: (r: Expense) => (
+        <span className="font-bold tabular-nums text-bad">
+          -{formatMoney(r.amount)}
+        </span>
+      ),
+    },
+  ];
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="flex-1 flex gap-4">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+      <PageHeader
+        title="Gastos y Egresos"
+        description="Control de salidas de dinero, compras de insumos y costos operativos"
+        actions={
+          <Button
+            variant="pri"
+            leftIcon={<Plus className="h-4 w-4" />}
+            onClick={() => setShowDrawer(true)}
+          >
+            Nuevo Gasto
+          </Button>
+        }
+      />
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard
+          label="Total de Gastos"
+          value={formatMoney(totalAmount)}
+          icon={<TrendingDown className="h-5 w-5 text-bad" />}
+          tone="bad"
+        />
+        <StatCard
+          label="Transacciones"
+          value={filteredExpenses.length}
+          icon={<Receipt className="h-5 w-5 text-muted" />}
+        />
+        <StatCard
+          label="Gasto Promedio"
+          value={formatMoney(averageAmount)}
+          icon={<DollarSign className="h-5 w-5 text-muted" />}
+        />
+        <StatCard
+          label="Mayor Categoría"
+          value={topCategory}
+          icon={<PieChart className="h-5 w-5 text-accent" />}
+          tone="accent"
+        />
+      </div>
+
+      {/* Panel con Filtros y Tabla */}
+      <Panel
+        title="Historial de Gastos"
+        description={`${filteredExpenses.length} egresos encontrados`}
+        action={
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="w-64">
+              <SearchInput
+                value={searchTerm}
+                onChange={setSearchTerm}
+                placeholder="Buscar por concepto o notas..."
+              />
+            </div>
+            <div className="flex items-center gap-1.5 text-xs">
+              <Calendar className="h-4 w-4 text-muted" />
+              <input
+                type="date"
+                value={dateFilter}
+                onChange={(e) => setDateFilter(e.target.value)}
+                className="field py-1.5 text-xs w-36"
+                title="Filtrar por fecha específica"
+              />
+              {dateFilter && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDateFilter('')}
+                >
+                  Limpiar fecha
+                </Button>
+              )}
+            </div>
+          </div>
+        }
+      >
+        <DataTable<Expense>
+          columns={columns}
+          rows={filteredExpenses}
+          rowKey={(r) => r.id}
+          loading={loading}
+          pageSize={10}
+          empty={
+            <EmptyState
+              icon={<Receipt className="h-10 w-10 text-muted" />}
+              title={searchTerm || dateFilter ? 'Sin gastos coincidentes' : 'No hay gastos registrados'}
+              description={
+                searchTerm || dateFilter
+                  ? 'Intenta modificando los filtros de búsqueda o fecha.'
+                  : 'Registra los gastos diarios del restaurante para mantener el control contable.'
+              }
+              action={
+                searchTerm || dateFilter ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSearchTerm('');
+                      setDateFilter('');
+                    }}
+                  >
+                    Restablecer filtros
+                  </Button>
+                ) : (
+                  <Button
+                    variant="pri"
+                    size="sm"
+                    leftIcon={<Plus className="h-4 w-4" />}
+                    onClick={() => setShowDrawer(true)}
+                  >
+                    Registrar primer gasto
+                  </Button>
+                )
+              }
+            />
+          }
+        />
+      </Panel>
+
+      {/* Drawer: Nuevo Gasto */}
+      <Drawer
+        open={showDrawer}
+        onClose={() => setShowDrawer(false)}
+        title="Nuevo Gasto"
+        description="Registra un egreso de caja o pago a proveedores"
+        size="md"
+        footer={
+          <div className="flex items-center justify-end gap-2 w-full">
+            <Button
+              variant="ghost"
+              onClick={() => setShowDrawer(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="pri"
+              loading={saving}
+              onClick={(e) => handleSubmit(e)}
+            >
+              Guardar Gasto
+            </Button>
+          </div>
+        }
+      >
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-muted uppercase tracking-wider mb-1">
+              Concepto del Gasto *
+            </label>
             <input
               type="text"
-              placeholder="Buscar gastos..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+              required
+              value={formData.concept}
+              onChange={(e) => setFormData({ ...formData, concept: e.target.value })}
+              placeholder="Ej. Compra de vegetales, Pago de gas, etc."
+              className="field"
             />
           </div>
-          <input
-            type="date"
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.target.value)}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-          />
-        </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 flex items-center space-x-2"
-        >
-          <Plus className="w-5 h-5" />
-          <span>Nuevo Gasto</span>
-        </button>
-      </div>
 
-      <div className="bg-white rounded-lg shadow p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-gray-900">Total de Gastos</h3>
-          <div className="text-2xl font-bold text-red-600">${totalExpenses.toFixed(2)}</div>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Fecha
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Concepto
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Monto
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Notas
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {filteredExpenses.map((expense) => (
-                <tr key={expense.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-900">
-                      {new Date(expense.date).toLocaleDateString()}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="text-sm font-medium text-gray-900">{expense.concept}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-bold text-red-600">${expense.amount.toFixed(2)}</div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="text-sm text-gray-600">{expense.notes || '-'}</div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-900">Nuevo Gasto</h3>
-              <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-muted uppercase tracking-wider mb-1">
+                Monto *
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                required
+                value={formData.amount}
+                onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                placeholder="0.00"
+                className="field"
+              />
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Concepto
-                </label>
-                <input
-                  type="text"
-                  value={formData.concept}
-                  onChange={(e) => setFormData({ ...formData, concept: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Monto
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={formData.amount}
-                    onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Fecha
-                  </label>
-                  <input
-                    type="date"
-                    value={formData.date}
-                    onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Categoría
-                </label>
-                <select
-                  value={formData.category}
-                  onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                >
-                  <option value="">Sin categoría</option>
-                  <option value="Alimentos">Alimentos</option>
-                  <option value="Bebidas">Bebidas</option>
-                  <option value="Mantenimiento">Mantenimiento</option>
-                  <option value="Personal">Personal</option>
-                  <option value="Servicios">Servicios</option>
-                  <option value="Otros">Otros</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Observaciones
-                </label>
-                <textarea
-                  value={formData.notes}
-                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                  rows={3}
-                />
-              </div>
-
-              <div className="flex space-x-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
-                >
-                  {loading ? 'Guardando...' : 'Guardar'}
-                </button>
-              </div>
-            </form>
+            <div>
+              <label className="block text-xs font-semibold text-muted uppercase tracking-wider mb-1">
+                Fecha *
+              </label>
+              <input
+                type="date"
+                required
+                value={formData.date}
+                onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+                className="field"
+              />
+            </div>
           </div>
-        </div>
-      )}
+
+          <div>
+            <label className="block text-xs font-semibold text-muted uppercase tracking-wider mb-1">
+              Categoría
+            </label>
+            <select
+              value={formData.category}
+              onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+              className="field"
+            >
+              <option value="">Sin categoría</option>
+              {CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted uppercase tracking-wider mb-1">
+              Observaciones / Comprobante
+            </label>
+            <textarea
+              value={formData.notes}
+              onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+              rows={3}
+              placeholder="Detalles adicionales, proveedor o número de factura de compra..."
+              className="field resize-none"
+            />
+          </div>
+        </form>
+      </Drawer>
     </div>
   );
 }

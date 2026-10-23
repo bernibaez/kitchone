@@ -1,22 +1,29 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useConfig } from '../contexts/ConfigContext';
-import { useNotification } from '../contexts/NotificationContext';
+import { useToast } from '../components/ui/Toast';
+import { tokenColor } from '../lib/theme';
+import {
+  PageHeader,
+  Button,
+  StatCard,
+  Panel,
+  Tag,
+  Tabs,
+  type TabItem,
+  EmptyState,
+} from '../components/ui';
 import {
   TrendingUp,
   DollarSign,
+  TrendingDown,
   UtensilsCrossed,
   FileText,
   FileSpreadsheet,
-  Filter,
   ShoppingCart,
-  ArrowUp,
-  ArrowDown,
-  Download,
   Lock,
   Calendar,
-  Phone,
-  CreditCard
+  Download,
 } from 'lucide-react';
 import {
   LineChart,
@@ -31,7 +38,7 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
-  ResponsiveContainer
+  ResponsiveContainer,
 } from 'recharts';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -93,11 +100,12 @@ interface CashClosing {
   };
 }
 
-const COLORS = ['#f97316', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444'];
+const PIE_COLORS = ['#E4570F', '#27362B', '#10B981', '#3B82F6', '#8B5CF6', '#F59E0B'];
 
 export default function Reports() {
   const { formatMoney, config } = useConfig();
-  const { showNotification } = useNotification();
+  const { toast } = useToast();
+
   const [stats, setStats] = useState<ReportStats>({
     totalSales: 0,
     totalExpenses: 0,
@@ -114,7 +122,7 @@ export default function Reports() {
   const [period, setPeriod] = useState<'day' | 'week' | 'month' | 'year'>('month');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
-  const [reportType, setReportType] = useState<'overview' | 'sales' | 'products' | 'analytics' | 'cash-closings'>('overview');
+  const [activeTab, setActiveTab] = useState<string>('overview');
 
   const loadCashClosings = async () => {
     try {
@@ -132,7 +140,7 @@ export default function Reports() {
 
       if (error) throw error;
       setCashClosings(data || []);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error loading cash closings:', error);
     }
   };
@@ -200,7 +208,7 @@ export default function Reports() {
           .select('id, sale_number, customer_name, total, payment_method, created_at')
           .gte('created_at', start.toISOString())
           .lte('created_at', end.toISOString())
-          .order('created_at', { ascending: false }) as any
+          .order('created_at', { ascending: false }) as any,
       ]);
 
       const totalSales = salesRes.data?.reduce((sum: number, sale: any) => sum + sale.total, 0) || 0;
@@ -246,7 +254,7 @@ export default function Reports() {
         .map(([category, amount]) => ({
           category,
           amount,
-          percentage: (amount / totalSales) * 100
+          percentage: totalSales > 0 ? (amount / totalSales) * 100 : 0,
         }))
         .sort((a, b) => b.amount - a.amount);
 
@@ -255,7 +263,7 @@ export default function Reports() {
       ordersRes.data?.forEach((order: any) => {
         const hour = new Date(order.created_at).getHours().toString().padStart(2, '0') + ':00';
         const existing = hourlyMap.get(hour) || { sales: 0, orders: 0 };
-        existing.sales += order.total;
+        existing.sales += order.total || 0;
         existing.orders += 1;
         hourlyMap.set(hour, existing);
       });
@@ -303,8 +311,8 @@ export default function Reports() {
         hourlySales,
         salesHistory,
       });
-    } catch (error) {
-      console.error('Error loading reports:', error);
+    } catch (error: any) {
+      toast({ title: 'Error al cargar reportes', message: error.message, tone: 'bad' });
     } finally {
       setLoading(false);
     }
@@ -314,780 +322,697 @@ export default function Reports() {
     try {
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
       const margin = 15;
       let yPos = margin;
 
       // Header
-      doc.setFontSize(20);
-      doc.setTextColor(0, 0, 0);
-      doc.text('Cierre de Caja', margin, yPos);
-      yPos += 10;
-
-      // Restaurant name
-      doc.setFontSize(12);
-      doc.text(config?.restaurant_name || 'Restaurante', margin, yPos);
+      doc.setFontSize(18);
+      doc.setFont('helvetica', 'bold');
+      doc.text(config?.restaurant_name || 'Kitch One', pageWidth / 2, yPos, { align: 'center' });
       yPos += 8;
 
-      // Closing number and date
-      doc.setFontSize(10);
-      doc.setTextColor(100, 100, 100);
-      doc.text(`Número: ${closing.closing_number}`, margin, yPos);
-      yPos += 6;
-      const date = new Date(closing.closed_at).toLocaleDateString('es-ES', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-      doc.text(`Fecha: ${date}`, margin, yPos);
-      yPos += 6;
-      if (closing.cash_opening) {
-        doc.text(`Apertura: ${closing.cash_opening.opening_number}`, margin, yPos);
-        yPos += 6;
-      }
-      yPos += 10;
-
-      // Sales Summary Table
       doc.setFontSize(14);
-      doc.setTextColor(0, 0, 0);
-      doc.text('Resumen de Ventas', margin, yPos);
-      yPos += 8;
+      doc.setFont('helvetica', 'normal');
+      doc.text('Cierre de Caja', pageWidth / 2, yPos, { align: 'center' });
+      yPos += 12;
+
+      // Closing Info
+      doc.setFontSize(10);
+      doc.text(`Cierre #: ${closing.closing_number}`, margin, yPos);
+      doc.text(
+        `Fecha: ${new Date(closing.closed_at).toLocaleString()}`,
+        pageWidth - margin,
+        yPos,
+        { align: 'right' }
+      );
+      yPos += 6;
+
+      if (closing.cash_opening) {
+        doc.text(`Apertura #: ${closing.cash_opening.opening_number}`, margin, yPos);
+        yPos += 10;
+      }
 
       autoTable(doc, {
         startY: yPos,
         head: [['Método de Pago', 'Monto']],
         body: [
-          ['Efectivo', formatMoney(closing.cash_amount)],
+          ['Efectivo en Caja', formatMoney(closing.cash_amount)],
           ['Transferencia', formatMoney(closing.transaction_amount)],
-          ['Tarjeta', formatMoney(closing.card_amount)],
-          ['Total Ventas', formatMoney(closing.total_sales)],
+          ['Tarjeta de Crédito / Débito', formatMoney(closing.card_amount)],
+          ['Total de Ventas', formatMoney(closing.total_sales)],
         ],
         theme: 'grid',
-        headStyles: { fillColor: [249, 115, 22], textColor: [255, 255, 255] },
-        columnStyles: {
-          0: { cellWidth: 80 },
-          1: { cellWidth: 60, halign: 'right' },
-        },
+        headStyles: { fillColor: [39, 54, 43] },
+        styles: { fontSize: 10 },
       });
 
-      yPos = (doc as any).lastAutoTable.finalY + 15;
+      yPos = (doc as any).lastAutoTable.finalY + 10;
 
-      // Cash Summary
-      doc.setFontSize(14);
-      doc.text('Resumen de Efectivo', margin, yPos);
-      yPos += 8;
-
-      autoTable(doc, {
-        startY: yPos,
-        head: [['Concepto', 'Monto']],
-        body: [
-          ['Fondo Inicial', formatMoney(closing.cash_opening?.opening_amount || 0)],
-          ['Ventas en Efectivo', formatMoney(closing.cash_amount)],
-          ['Efectivo Esperado', formatMoney(closing.expected_cash)],
-          ['Diferencia', formatMoney(closing.difference)],
-        ],
-        theme: 'grid',
-        headStyles: { fillColor: [249, 115, 22], textColor: [255, 255, 255] },
-        columnStyles: {
-          0: { cellWidth: 80 },
-          1: { cellWidth: 60, halign: 'right' },
-        },
-      });
-
-      yPos = (doc as any).lastAutoTable.finalY + 15;
-
-      // Notes if present
       if (closing.notes) {
-        doc.setFontSize(12);
-        doc.text('Notas:', margin, yPos);
-        yPos += 6;
         doc.setFontSize(10);
-        doc.setTextColor(100, 100, 100);
-        const splitNotes = doc.splitTextToSize(closing.notes, pageWidth - 2 * margin);
-        doc.text(splitNotes, margin, yPos);
+        doc.text('Notas:', margin, yPos);
+        yPos += 5;
+        doc.setFontSize(9);
+        doc.text(closing.notes, margin, yPos);
       }
 
-      // Footer
-      doc.setFontSize(8);
-      doc.setTextColor(150, 150, 150);
-      doc.text(
-        `Generado por Kitch One - ${new Date().toLocaleString('es-ES')}`,
-        margin,
-        pageHeight - 10
-      );
-
-      // Save PDF
-      doc.save(`cierre-caja-${closing.closing_number}.pdf`);
-
-      showNotification({
-        type: 'success',
-        title: 'PDF descargado',
-        message: 'El reporte de cierre de caja se ha descargado exitosamente',
-      });
-    } catch (error) {
-      console.error('Error generating PDF:', error);
-      showNotification({
-        type: 'error',
-        title: 'Error',
-        message: 'No se pudo generar el PDF',
-      });
+      doc.save(`cierre_${closing.closing_number}.pdf`);
+      toast({ title: 'PDF generado', message: `Cierre #${closing.closing_number}`, tone: 'ok' });
+    } catch (err: any) {
+      toast({ title: 'Error al generar PDF', message: err.message, tone: 'bad' });
     }
   };
 
   const exportToPDF = () => {
-    const doc = new jsPDF();
-    const pageWidth = doc.internal.pageSize.getWidth();
-    
-    // Title
-    doc.setFontSize(20);
-    doc.text('Reporte de Ventas', pageWidth / 2, 20, { align: 'center' });
-    
-    // Period
-    doc.setFontSize(12);
-    const periodText = startDate && endDate 
-      ? `Período: ${startDate} a ${endDate}`
-      : `Período: ${period === 'day' ? 'Hoy' : period === 'week' ? 'Última semana' : period === 'month' ? 'Último mes' : 'Último año'}`;
-    doc.text(periodText, pageWidth / 2, 30, { align: 'center' });
-    
-    // Summary stats
-    doc.setFontSize(14);
-    doc.text('Resumen General', 20, 50);
-    
-    let lastY = 55;
-    
-    autoTable(doc, {
-      startY: lastY,
-      head: [['Métrica', 'Valor']],
-      body: [
-        ['Ventas Totales', `$${stats.totalSales.toFixed(2)}`],
-        ['Gastos Totales', `$${stats.totalExpenses.toFixed(2)}`],
-        ['Utilidad', `$${stats.profit.toFixed(2)}`],
-        ['Total de Órdenes', stats.orderCount.toString()],
-      ],
-      theme: 'grid',
-      styles: { fontSize: 10 },
-    });
-    
-    lastY = (doc as any).lastAutoTable?.finalY || 100;
-    
-    // Top dishes
-    if (stats.topDishes.length > 0) {
-      doc.setFontSize(14);
-      doc.text('Platillos Más Vendidos', 20, lastY + 15);
-      
+    try {
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFontSize(18);
+      doc.setFont('helvetica', 'bold');
+      doc.text(config?.restaurant_name || 'Kitch One', pageWidth / 2, 15, { align: 'center' });
+
+      doc.setFontSize(13);
+      doc.setFont('helvetica', 'normal');
+      doc.text('Reporte de Desempeño Financiero', pageWidth / 2, 23, { align: 'center' });
+
+      const periodText =
+        startDate && endDate
+          ? `Período: ${startDate} al ${endDate}`
+          : `Período: ${period === 'day' ? 'Hoy' : period === 'week' ? 'Última semana' : period === 'month' ? 'Último mes' : 'Último año'}`;
+      doc.setFontSize(10);
+      doc.text(periodText, pageWidth / 2, 30, { align: 'center' });
+
       autoTable(doc, {
-        startY: lastY + 20,
-        head: [['#', 'Platillo', 'Unidades', 'Ingresos']],
-        body: stats.topDishes.map((dish, index) => [
-          (index + 1).toString(),
-          dish.name,
-          dish.quantity.toString(),
-          `$${dish.revenue.toFixed(2)}`
-        ]),
+        startY: 38,
+        head: [['Métrica', 'Valor']],
+        body: [
+          ['Ventas Totales', formatMoney(stats.totalSales)],
+          ['Gastos Totales', formatMoney(stats.totalExpenses)],
+          ['Utilidad Neta', formatMoney(stats.profit)],
+          ['Total de Órdenes', stats.orderCount.toString()],
+        ],
         theme: 'grid',
+        headStyles: { fillColor: [39, 54, 43] },
         styles: { fontSize: 10 },
       });
+
+      let lastY = (doc as any).lastAutoTable?.finalY || 80;
+
+      if (stats.topDishes.length > 0) {
+        doc.setFontSize(12);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Platillos Más Vendidos', 15, lastY + 12);
+
+        autoTable(doc, {
+          startY: lastY + 16,
+          head: [['#', 'Platillo', 'Unidades', 'Ingresos']],
+          body: stats.topDishes.map((dish, idx) => [
+            (idx + 1).toString(),
+            dish.name,
+            dish.quantity.toString(),
+            formatMoney(dish.revenue),
+          ]),
+          theme: 'grid',
+          headStyles: { fillColor: [228, 87, 15] },
+          styles: { fontSize: 9 },
+        });
+      }
+
+      doc.save(`reporte_${new Date().toISOString().split('T')[0]}.pdf`);
+      toast({ title: 'Reporte PDF descargado', tone: 'ok' });
+    } catch (err: any) {
+      toast({ title: 'Error al exportar PDF', message: err.message, tone: 'bad' });
     }
-    
-    // Daily sales
-    if (stats.dailySales.length > 0) {
-      doc.addPage();
-      doc.setFontSize(14);
-      doc.text('Ventas Diarias', 20, 20);
-      
-      autoTable(doc, {
-        startY: 25,
-        head: [['Fecha', 'Ventas', 'Gastos', 'Órdenes']],
-        body: stats.dailySales.map(day => [
-          day.date,
-          `$${day.sales.toFixed(2)}`,
-          `$${day.expenses.toFixed(2)}`,
-          day.orders.toString()
-        ]),
-        theme: 'grid',
-        styles: { fontSize: 10 },
-      });
-    }
-    
-    doc.save(`reporte_${new Date().toISOString().split('T')[0]}.pdf`);
   };
 
   const exportToExcel = () => {
-    const wb = XLSX.utils.book_new();
-    
-    // Summary sheet
-    const summaryData = [
-      ['Métrica', 'Valor'],
-      ['Ventas Totales', stats.totalSales],
-      ['Gastos Totales', stats.totalExpenses],
-      ['Utilidad', stats.profit],
-      ['Total de Órdenes', stats.orderCount],
-    ];
-    const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
-    XLSX.utils.book_append_sheet(wb, summaryWs, 'Resumen');
-    
-    // Top dishes sheet
-    if (stats.topDishes.length > 0) {
-      const dishesData = [
-        ['Platillo', 'Unidades Vendidas', 'Ingresos'],
-        ...stats.topDishes.map(dish => [
-          dish.name,
-          dish.quantity,
-          dish.revenue
-        ])
+    try {
+      const wb = XLSX.utils.book_new();
+
+      const summaryData = [
+        ['Métrica', 'Valor'],
+        ['Ventas Totales', stats.totalSales],
+        ['Gastos Totales', stats.totalExpenses],
+        ['Utilidad', stats.profit],
+        ['Total de Órdenes', stats.orderCount],
       ];
-      const dishesWs = XLSX.utils.aoa_to_sheet(dishesData);
-      XLSX.utils.book_append_sheet(wb, dishesWs, 'Platillos Más Vendidos');
+      const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
+      XLSX.utils.book_append_sheet(wb, summaryWs, 'Resumen');
+
+      if (stats.topDishes.length > 0) {
+        const dishesData = [
+          ['Platillo', 'Unidades Vendidas', 'Ingresos'],
+          ...stats.topDishes.map((dish) => [dish.name, dish.quantity, dish.revenue]),
+        ];
+        const dishesWs = XLSX.utils.aoa_to_sheet(dishesData);
+        XLSX.utils.book_append_sheet(wb, dishesWs, 'Platillos Más Vendidos');
+      }
+
+      if (stats.dailySales.length > 0) {
+        const dailyData = [
+          ['Fecha', 'Ventas', 'Gastos', 'Órdenes'],
+          ...stats.dailySales.map((day) => [day.date, day.sales, day.expenses, day.orders]),
+        ];
+        const dailyWs = XLSX.utils.aoa_to_sheet(dailyData);
+        XLSX.utils.book_append_sheet(wb, dailyWs, 'Ventas Diarias');
+      }
+
+      XLSX.writeFile(wb, `reporte_${new Date().toISOString().split('T')[0]}.xlsx`);
+      toast({ title: 'Reporte Excel descargado', tone: 'ok' });
+    } catch (err: any) {
+      toast({ title: 'Error al exportar Excel', message: err.message, tone: 'bad' });
     }
-    
-    // Daily sales sheet
-    if (stats.dailySales.length > 0) {
-      const dailyData = [
-        ['Fecha', 'Ventas', 'Gastos', 'Órdenes'],
-        ...stats.dailySales.map(day => [
-          day.date,
-          day.sales,
-          day.expenses,
-          day.orders
-        ])
-      ];
-      const dailyWs = XLSX.utils.aoa_to_sheet(dailyData);
-      XLSX.utils.book_append_sheet(wb, dailyWs, 'Ventas Diarias');
-    }
-    
-    // Category sales sheet
-    if (stats.categorySales.length > 0) {
-      const categoryData = [
-        ['Categoría', 'Ventas', 'Porcentaje'],
-        ...stats.categorySales.map(cat => [
-          cat.category,
-          cat.amount,
-          `${cat.percentage.toFixed(1)}%`
-        ])
-      ];
-      const categoryWs = XLSX.utils.aoa_to_sheet(categoryData);
-      XLSX.utils.book_append_sheet(wb, categoryWs, 'Ventas por Categoría');
-    }
-    
-    // Hourly sales sheet
-    if (stats.hourlySales.length > 0) {
-      const hourlyData = [
-        ['Hora', 'Ventas', 'Órdenes'],
-        ...stats.hourlySales.map(hour => [
-          hour.hour,
-          hour.sales,
-          hour.orders
-        ])
-      ];
-      const hourlyWs = XLSX.utils.aoa_to_sheet(hourlyData);
-      XLSX.utils.book_append_sheet(wb, hourlyWs, 'Ventas por Hora');
-    }
-    
-    XLSX.writeFile(wb, `reporte_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
-      </div>
-    );
-  }
+  const reportTabs: TabItem[] = [
+    { id: 'overview', label: 'Vista General' },
+    { id: 'sales', label: 'Ventas y Horarios' },
+    { id: 'products', label: 'Platillos Más Vendidos' },
+    { id: 'analytics', label: 'Categorías' },
+    { id: 'cash-closings', label: 'Cierres de Caja', count: cashClosings.length },
+  ];
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Reportes y Análisis</h1>
-            <p className="text-gray-600 mt-1">Visualiza y analiza el rendimiento de tu restaurante</p>
-          </div>
-          <div className="flex gap-2">
-            <button
+      <PageHeader
+        title="Reportes y Análisis"
+        description="Métricas financieras, rendimiento de ventas y auditoría de cierres de caja"
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              leftIcon={<FileText className="h-4 w-4 text-bad" />}
               onClick={exportToPDF}
-              className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
             >
-              <FileText className="w-4 h-4" />
               Exportar PDF
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="outline"
+              leftIcon={<FileSpreadsheet className="h-4 w-4 text-ok" />}
               onClick={exportToExcel}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
             >
-              <FileSpreadsheet className="w-4 h-4" />
               Exportar Excel
-            </button>
+            </Button>
           </div>
-        </div>
+        }
+      />
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard
+          label="Ventas Totales"
+          value={formatMoney(stats.totalSales)}
+          icon={<TrendingUp className="h-5 w-5 text-ok" />}
+          tone="ok"
+        />
+        <StatCard
+          label="Gastos Totales"
+          value={formatMoney(stats.totalExpenses)}
+          icon={<TrendingDown className="h-5 w-5 text-bad" />}
+          tone="bad"
+        />
+        <StatCard
+          label="Utilidad Neta"
+          value={formatMoney(stats.profit)}
+          icon={<DollarSign className={`h-5 w-5 ${stats.profit >= 0 ? 'text-ok' : 'text-bad'}`} />}
+          tone={stats.profit >= 0 ? 'ok' : 'bad'}
+        />
+        <StatCard
+          label="Total de Órdenes"
+          value={stats.orderCount}
+          icon={<ShoppingCart className="h-5 w-5 text-accent" />}
+          tone="accent"
+        />
       </div>
 
-      {/* Filters */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <div className="flex items-center gap-2 mb-4">
-          <Filter className="w-5 h-5 text-gray-500" />
-          <h3 className="text-lg font-semibold text-gray-900">Filtros</h3>
-        </div>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Report Type */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Tipo de Reporte</label>
-            <select
-              value={reportType}
-              onChange={(e) => setReportType(e.target.value as any)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-            >
-              <option value="overview">Vista General</option>
-              <option value="sales">Análisis de Ventas</option>
-              <option value="products">Productos</option>
-              <option value="analytics">Análisis Avanzado</option>
-              <option value="cash-closings">Cierres de Caja</option>
-            </select>
+      {/* Filtros de período */}
+      <Panel
+        title="Rango Temporal"
+        description="Selecciona un período predeterminado o un intervalo personalizado de fechas"
+      >
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-1 rounded-lg border border-line bg-surface-2 p-1">
+            {(['day', 'week', 'month', 'year'] as const).map((p) => (
+              <button
+                key={p}
+                onClick={() => {
+                  setPeriod(p);
+                  setStartDate('');
+                  setEndDate('');
+                }}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  period === p && !startDate
+                    ? 'bg-ink text-ink-on shadow-xs'
+                    : 'text-muted hover:text-fg'
+                }`}
+              >
+                {p === 'day' ? 'Día' : p === 'week' ? 'Semana' : p === 'month' ? 'Mes' : 'Año'}
+              </button>
+            ))}
           </div>
 
-          {/* Period */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Período</label>
-            <div className="flex gap-1">
-              {(['day', 'week', 'month', 'year'] as const).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setPeriod(p)}
-                  className={`flex-1 px-3 py-2 rounded-lg font-medium transition-colors ${
-                    period === p
-                      ? 'bg-orange-500 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  {p === 'day' ? 'Día' : p === 'week' ? 'Semana' : p === 'month' ? 'Mes' : 'Año'}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Custom Date Range */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Fecha Inicio</label>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted font-medium">Desde:</span>
             <input
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+              className="field py-1 text-xs w-36"
             />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Fecha Fin</label>
+            <span className="text-muted font-medium">Hasta:</span>
             <input
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+              className="field py-1 text-xs w-36"
             />
-          </div>
-        </div>
-      </div>
-
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
-          <div className="flex items-center justify-between">
-            <div className="flex-1">
-              <p className="text-sm font-medium text-gray-600">Ventas Totales</p>
-              <p className="text-2xl font-bold text-gray-900 mt-2">
-                ${stats.totalSales.toFixed(2)}
-              </p>
-              <div className="flex items-center mt-2 text-sm">
-                <ArrowUp className="w-4 h-4 text-green-500 mr-1" />
-                <span className="text-green-500">+12.5%</span>
-                <span className="text-gray-500 ml-1">vs período anterior</span>
-              </div>
-            </div>
-            <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-              <TrendingUp className="w-6 h-6 text-green-600" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
-          <div className="flex items-center justify-between">
-            <div className="flex-1">
-              <p className="text-sm font-medium text-gray-600">Gastos Totales</p>
-              <p className="text-2xl font-bold text-gray-900 mt-2">
-                ${stats.totalExpenses.toFixed(2)}
-              </p>
-              <div className="flex items-center mt-2 text-sm">
-                <ArrowDown className="w-4 h-4 text-red-500 mr-1" />
-                <span className="text-red-500">+8.2%</span>
-                <span className="text-gray-500 ml-1">vs período anterior</span>
-              </div>
-            </div>
-            <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-              <DollarSign className="w-6 h-6 text-red-600" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
-          <div className="flex items-center justify-between">
-            <div className="flex-1">
-              <p className="text-sm font-medium text-gray-600">Utilidad Neta</p>
-              <p className={`text-2xl font-bold mt-2 ${
-                stats.profit >= 0 ? 'text-green-600' : 'text-red-600'
-              }`}>
-                ${stats.profit.toFixed(2)}
-              </p>
-              <div className="flex items-center mt-2 text-sm">
-                {stats.profit >= 0 ? (
-                  <>
-                    <ArrowUp className="w-4 h-4 text-green-500 mr-1" />
-                    <span className="text-green-500">+15.3%</span>
-                  </>
-                ) : (
-                  <>
-                    <ArrowDown className="w-4 h-4 text-red-500 mr-1" />
-                    <span className="text-red-500">-5.1%</span>
-                  </>
-                )}
-                <span className="text-gray-500 ml-1">vs período anterior</span>
-              </div>
-            </div>
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
-              stats.profit >= 0 ? 'bg-green-100' : 'bg-red-100'
-            }`}>
-              <DollarSign className={`w-6 h-6 ${
-                stats.profit >= 0 ? 'text-green-600' : 'text-red-600'
-              }`} />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
-          <div className="flex items-center justify-between">
-            <div className="flex-1">
-              <p className="text-sm font-medium text-gray-600">Total de Órdenes</p>
-              <p className="text-2xl font-bold text-gray-900 mt-2">{stats.orderCount}</p>
-              <div className="flex items-center mt-2 text-sm">
-                <ArrowUp className="w-4 h-4 text-blue-500 mr-1" />
-                <span className="text-blue-500">+18.7%</span>
-                <span className="text-gray-500 ml-1">vs período anterior</span>
-              </div>
-            </div>
-            <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-              <ShoppingCart className="w-6 h-6 text-blue-600" />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Charts Section */}
-      {(reportType === 'overview' || reportType === 'sales') && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Sales Trend */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Tendencia de Ventas</h3>
-            {stats.dailySales.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={stats.dailySales}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" />
-                  <YAxis />
-                  <Tooltip formatter={(value) => `$${Number(value).toFixed(2)}`} />
-                  <Legend />
-                  <Line type="monotone" dataKey="sales" stroke="#f97316" name="Ventas" strokeWidth={2} />
-                  <Line type="monotone" dataKey="expenses" stroke="#ef4444" name="Gastos" strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="h-64 flex items-center justify-center text-gray-500">
-                No hay datos disponibles para el período seleccionado
-              </div>
-            )}
-          </div>
-
-          {/* Category Distribution */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Ventas por Categoría</h3>
-            {stats.categorySales.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <RePieChart>
-                  <Pie
-                    data={stats.categorySales}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={({ payload }: any) => `${payload.category}: ${payload.percentage.toFixed(1)}%`}
-                    outerRadius={80}
-                    fill="#8884d8"
-                    dataKey="amount"
-                  >
-                    {stats.categorySales.map((_, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value) => `$${Number(value).toFixed(2)}`} />
-                </RePieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="h-64 flex items-center justify-center text-gray-500">
-                No hay datos de categorías disponibles
-              </div>
+            {(startDate || endDate) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setStartDate('');
+                  setEndDate('');
+                }}
+              >
+                Restablecer
+              </Button>
             )}
           </div>
         </div>
-      )}
+      </Panel>
 
-      {/* Hourly Sales */}
-      {(reportType === 'overview' || reportType === 'analytics') && stats.hourlySales.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Ventas por Hora del Día</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={stats.hourlySales}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="hour" />
-              <YAxis />
-              <Tooltip formatter={(value) => `$${Number(value).toFixed(2)}`} />
-              <Legend />
-              <Bar dataKey="sales" fill="#f97316" name="Ventas" />
-              <Bar dataKey="orders" fill="#3b82f6" name="Órdenes" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+      {/* Tabs y Contenido de Reportes */}
+      <Panel
+        title={
+          <Tabs
+            items={reportTabs}
+            value={activeTab}
+            onChange={setActiveTab}
+          />
+        }
+      >
+        {loading ? (
+          <div className="py-16 text-center text-muted text-sm">Calculando métricas...</div>
+        ) : (
+          <div className="space-y-6 pt-2">
+            {/* TAB: VISTA GENERAL */}
+            {activeTab === 'overview' && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Gráfico de tendencia */}
+                  <div className="p-4 rounded-xl border border-line bg-surface-2">
+                    <h3 className="font-bold text-sm text-ink dark:text-line mb-4">
+                      Tendencia Diaria (Ventas vs Gastos)
+                    </h3>
+                    {stats.dailySales.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={260}>
+                        <LineChart data={stats.dailySales}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={tokenColor('line')} opacity={0.6} />
+                          <XAxis dataKey="date" stroke={tokenColor('muted')} fontSize={11} />
+                          <YAxis stroke={tokenColor('muted')} fontSize={11} />
+                          <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                          <Legend />
+                          <Line
+                            type="monotone"
+                            dataKey="sales"
+                            stroke={tokenColor('accent')}
+                            name="Ventas"
+                            strokeWidth={2.5}
+                            dot={{ r: 3 }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="expenses"
+                            stroke={tokenColor('bad')}
+                            name="Gastos"
+                            strokeWidth={2}
+                            dot={{ r: 3 }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-64 flex items-center justify-center text-muted text-xs">
+                        Sin datos para el período seleccionado
+                      </div>
+                    )}
+                  </div>
 
-      {/* Top Products */}
-      {(reportType === 'overview' || reportType === 'products') && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Platillos Más Vendidos</h3>
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <UtensilsCrossed className="w-4 h-4" />
-              <span>Top 10 productos</span>
-            </div>
-          </div>
-          {stats.topDishes.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
-              <UtensilsCrossed className="w-12 h-12 mx-auto mb-4 text-gray-300" />
-              <p>No hay datos de ventas para este período</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-200">
-                    <th className="text-left py-3 px-4 font-medium text-gray-700">#</th>
-                    <th className="text-left py-3 px-4 font-medium text-gray-700">Platillo</th>
-                    <th className="text-center py-3 px-4 font-medium text-gray-700">Unidades</th>
-                    <th className="text-right py-3 px-4 font-medium text-gray-700">Ingresos</th>
-                    <th className="text-right py-3 px-4 font-medium text-gray-700">Precio Promedio</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stats.topDishes.map((dish, index) => (
-                    <tr key={dish.name} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="py-3 px-4">
-                        <div className="w-8 h-8 bg-orange-500 text-white rounded-full flex items-center justify-center font-bold text-sm">
-                          {index + 1}
+                  {/* Distribución por Categoría */}
+                  <div className="p-4 rounded-xl border border-line bg-surface-2">
+                    <h3 className="font-bold text-sm text-ink dark:text-line mb-4">
+                      Ventas por Categoría
+                    </h3>
+                    {stats.categorySales.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={260}>
+                        <RePieChart>
+                          <Pie
+                            data={stats.categorySales}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={50}
+                            outerRadius={85}
+                            paddingAngle={3}
+                            dataKey="amount"
+                          >
+                            {stats.categorySales.map((_, index) => (
+                              <Cell
+                                key={`cell-${index}`}
+                                fill={PIE_COLORS[index % PIE_COLORS.length]}
+                              />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                          <Legend />
+                        </RePieChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-64 flex items-center justify-center text-muted text-xs">
+                        Sin categorías registradas en el período
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Top Platillos resumen */}
+                <div className="p-4 rounded-xl border border-line bg-surface-2">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-bold text-sm text-ink dark:text-line">
+                      Top 5 Platillos Más Vendidos
+                    </h3>
+                    <Tag tone="accent">Top 5</Tag>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                    {stats.topDishes.slice(0, 5).map((dish, idx) => (
+                      <div
+                        key={dish.name}
+                        className="p-3 rounded-lg border border-line bg-surface flex flex-col justify-between"
+                      >
+                        <div className="flex items-center justify-between gap-1 mb-2">
+                          <span className="font-bold text-xs text-ink dark:text-line truncate">
+                            {dish.name}
+                          </span>
+                          <span className="text-[10px] font-bold text-muted tabular-nums">
+                            #{idx + 1}
+                          </span>
                         </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <p className="font-medium text-gray-900">{dish.name}</p>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                          {dish.quantity}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right font-medium text-green-600">
-                        ${dish.revenue.toFixed(2)}
-                      </td>
-                      <td className="py-3 px-4 text-right text-gray-600">
-                        ${(dish.revenue / dish.quantity).toFixed(2)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Sales History */}
-      {(reportType === 'overview' || reportType === 'sales') && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Historial de Ventas</h3>
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <ShoppingCart className="w-4 h-4" />
-              <span>Últimas 20 ventas</span>
-            </div>
-          </div>
-          {stats.salesHistory.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
-              <ShoppingCart className="w-12 h-12 mx-auto mb-4 text-gray-300" />
-              <p>No hay datos de ventas para este período</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-200">
-                    <th className="text-left py-3 px-4 font-medium text-gray-700">Factura</th>
-                    <th className="text-left py-3 px-4 font-medium text-gray-700">Cliente</th>
-                    <th className="text-left py-3 px-4 font-medium text-gray-700">Fecha</th>
-                    <th className="text-center py-3 px-4 font-medium text-gray-700">Método</th>
-                    <th className="text-right py-3 px-4 font-medium text-gray-700">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stats.salesHistory.slice(0, 20).map((sale) => (
-                    <tr key={sale.id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="py-3 px-4">
-                        <p className="font-medium text-gray-900">#{sale.sale_number}</p>
-                      </td>
-                      <td className="py-3 px-4">
-                        <p className="font-medium text-gray-900">
-                          {sale.customer_name || 'Cliente general'}
-                        </p>
-                      </td>
-                      <td className="py-3 px-4 text-gray-600">
-                        {new Date(sale.created_at).toLocaleDateString('es-ES', {
-                          day: '2-digit',
-                          month: '2-digit',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit'
-                        })}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          sale.payment_method === 'cash' 
-                            ? 'bg-green-100 text-green-800'
-                            : sale.payment_method === 'card'
-                            ? 'bg-blue-100 text-blue-800'
-                            : 'bg-purple-100 text-purple-800'
-                        }`}>
-                          {sale.payment_method === 'cash' ? 'Efectivo' : 
-                           sale.payment_method === 'card' ? 'Tarjeta' : 'Transferencia'}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right font-medium text-green-600">
-                        ${sale.total.toFixed(2)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Cash Closings Section */}
-      {reportType === 'cash-closings' && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-2">
-              <Lock className="w-5 h-5 text-orange-500" />
-              <h3 className="text-lg font-semibold text-gray-900">Cierres de Caja</h3>
-            </div>
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <Calendar className="w-4 h-4" />
-              <span>Historial completo</span>
-            </div>
-          </div>
-
-          {cashClosings.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
-              <Lock className="w-12 h-12 mx-auto mb-4 text-gray-300" />
-              <p>No hay cierres de caja registrados</p>
-            </div>
-          ) : (
-            <div className="grid gap-4">
-              {cashClosings.map((closing) => (
-                <div
-                  key={closing.id}
-                  className="bg-gray-50 rounded-xl border border-gray-200 p-6 hover:shadow-md transition-shadow"
-                >
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <Lock className="w-5 h-5 text-orange-500" />
-                        <h4 className="text-lg font-bold text-gray-800">{closing.closing_number}</h4>
+                        <div className="flex items-baseline justify-between text-xs pt-2 border-t border-line/60">
+                          <span className="text-muted tabular-nums">{dish.quantity} un.</span>
+                          <span className="font-bold text-ok tabular-nums">
+                            {formatMoney(dish.revenue)}
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 text-sm text-gray-500">
-                        <Calendar className="w-4 h-4" />
-                        {new Date(closing.closed_at).toLocaleDateString('es-ES', {
-                          year: 'numeric',
-                          month: 'long',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </div>
-                      {closing.cash_opening && (
-                        <p className="text-sm text-gray-500 mt-1">
-                          Apertura: {closing.cash_opening.opening_number}
-                        </p>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => generateClosingPDF(closing)}
-                      className="flex items-center gap-2 bg-orange-50 text-orange-600 px-4 py-2 rounded-lg hover:bg-orange-100 transition-colors"
-                    >
-                      <Download className="w-4 h-4" />
-                      <span className="font-medium">Descargar PDF</span>
-                    </button>
+                    ))}
                   </div>
+                </div>
+              </div>
+            )}
 
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 pt-4 border-t border-gray-200">
-                    <div className="bg-green-50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-green-600 mb-1">
-                        <DollarSign className="w-4 h-4" />
-                        <span className="text-xs font-medium">Efectivo</span>
-                      </div>
-                      <p className="text-lg font-bold text-green-700">{formatMoney(closing.cash_amount)}</p>
-                    </div>
-                    <div className="bg-blue-50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-blue-600 mb-1">
-                        <Phone className="w-4 h-4" />
-                        <span className="text-xs font-medium">Transferencia</span>
-                      </div>
-                      <p className="text-lg font-bold text-blue-700">{formatMoney(closing.transaction_amount)}</p>
-                    </div>
-                    <div className="bg-purple-50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-purple-600 mb-1">
-                        <CreditCard className="w-4 h-4" />
-                        <span className="text-xs font-medium">Tarjeta</span>
-                      </div>
-                      <p className="text-lg font-bold text-purple-700">{formatMoney(closing.card_amount)}</p>
-                    </div>
-                    <div className="bg-orange-50 rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-orange-600 mb-1">
-                        <DollarSign className="w-4 h-4" />
-                        <span className="text-xs font-medium">Total</span>
-                      </div>
-                      <p className="text-lg font-bold text-orange-700">{formatMoney(closing.total_sales)}</p>
-                    </div>
-                  </div>
-
-                  {closing.notes && (
-                    <div className="mt-4 pt-4 border-t border-gray-200">
-                      <p className="text-sm text-gray-600">
-                        <span className="font-medium">Notas:</span> {closing.notes}
-                      </p>
+            {/* TAB: VENTAS Y HORARIOS */}
+            {activeTab === 'sales' && (
+              <div className="space-y-6">
+                {/* Horarios con mayor afluencia */}
+                <div className="p-4 rounded-xl border border-line bg-surface-2">
+                  <h3 className="font-bold text-sm text-ink dark:text-line mb-4">
+                    Ventas por Hora del Día
+                  </h3>
+                  {stats.hourlySales.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={280}>
+                      <BarChart data={stats.hourlySales}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={tokenColor('line')} opacity={0.6} />
+                        <XAxis dataKey="hour" stroke={tokenColor('muted')} fontSize={11} />
+                        <YAxis stroke={tokenColor('muted')} fontSize={11} />
+                        <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                        <Legend />
+                        <Bar dataKey="sales" fill={tokenColor('accent')} name="Monto ($)" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="orders" fill={tokenColor('ink')} name="Órdenes" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-64 flex items-center justify-center text-muted text-xs">
+                      Sin datos de horarios registrados
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+
+                {/* Historial reciente */}
+                <div className="p-4 rounded-xl border border-line bg-surface-2">
+                  <h3 className="font-bold text-sm text-ink dark:text-line mb-3">
+                    Últimas 20 Ventas Registradas
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-line text-left text-muted">
+                          <th className="py-2.5 px-3 font-semibold">Factura</th>
+                          <th className="py-2.5 px-3 font-semibold">Cliente</th>
+                          <th className="py-2.5 px-3 font-semibold">Fecha y Hora</th>
+                          <th className="py-2.5 px-3 font-semibold">Método</th>
+                          <th className="py-2.5 px-3 font-semibold text-right">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-line/60">
+                        {stats.salesHistory.slice(0, 20).map((sale) => (
+                          <tr key={sale.id} className="hover:bg-surface/50">
+                            <td className="py-2.5 px-3 font-mono font-bold text-ink dark:text-line">
+                              #{sale.sale_number}
+                            </td>
+                            <td className="py-2.5 px-3 text-fg">
+                              {sale.customer_name || 'Consumidor Final'}
+                            </td>
+                            <td className="py-2.5 px-3 text-muted tabular-nums">
+                              {new Date(sale.created_at).toLocaleString()}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <Tag tone={sale.payment_method === 'cash' ? 'ok' : 'info'}>
+                                {sale.payment_method === 'cash' ? 'Efectivo' : 'Tarjeta'}
+                              </Tag>
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-ok tabular-nums">
+                              {formatMoney(sale.total)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB: PRODUCTOS */}
+            {activeTab === 'products' && (
+              <div className="p-4 rounded-xl border border-line bg-surface-2">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-bold text-sm text-ink dark:text-line">
+                    Ranking de Platillos (Top 10)
+                  </h3>
+                  <span className="text-xs text-muted">Ordenado por unidades vendidas</span>
+                </div>
+                {stats.topDishes.length === 0 ? (
+                  <EmptyState
+                    icon={<UtensilsCrossed className="h-10 w-10 text-muted" />}
+                    title="Sin ventas de productos"
+                    description="No hay información de ítems vendidos en el intervalo seleccionado."
+                  />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-line text-left text-muted">
+                          <th className="py-2.5 px-3 font-semibold w-12">#</th>
+                          <th className="py-2.5 px-3 font-semibold">Platillo</th>
+                          <th className="py-2.5 px-3 font-semibold text-center">Unidades</th>
+                          <th className="py-2.5 px-3 font-semibold text-right">Precio Promedio</th>
+                          <th className="py-2.5 px-3 font-semibold text-right">Ingresos Totales</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-line/60">
+                        {stats.topDishes.map((dish, idx) => (
+                          <tr key={dish.name} className="hover:bg-surface/50">
+                            <td className="py-2.5 px-3 font-bold text-muted tabular-nums">
+                              #{idx + 1}
+                            </td>
+                            <td className="py-2.5 px-3 font-semibold text-ink dark:text-line">
+                              {dish.name}
+                            </td>
+                            <td className="py-2.5 px-3 text-center tabular-nums">
+                              <span className="font-bold text-fg bg-surface px-2.5 py-1 rounded-md border border-line">
+                                {dish.quantity}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-muted tabular-nums">
+                              {formatMoney(dish.revenue / dish.quantity)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-ok tabular-nums">
+                              {formatMoney(dish.revenue)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB: CATEGORÍAS */}
+            {activeTab === 'analytics' && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="p-4 rounded-xl border border-line bg-surface-2">
+                  <h3 className="font-bold text-sm text-ink dark:text-line mb-4">
+                    Participación de Ventas por Categoría
+                  </h3>
+                  {stats.categorySales.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={280}>
+                      <RePieChart>
+                        <Pie
+                          data={stats.categorySales}
+                          cx="50%"
+                          cy="50%"
+                          labelLine={false}
+                          label={({ payload }: any) => `${payload.category}: ${payload.percentage.toFixed(0)}%`}
+                          outerRadius={95}
+                          dataKey="amount"
+                        >
+                          {stats.categorySales.map((_, index) => (
+                            <Cell
+                              key={`cell-${index}`}
+                              fill={PIE_COLORS[index % PIE_COLORS.length]}
+                            />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(value) => formatMoney(Number(value))} />
+                      </RePieChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-64 flex items-center justify-center text-muted text-xs">
+                      Sin datos de categorías
+                    </div>
+                  )}
+                </div>
+
+                <div className="p-4 rounded-xl border border-line bg-surface-2 space-y-3">
+                  <h3 className="font-bold text-sm text-ink dark:text-line">
+                    Detalle por Categoría
+                  </h3>
+                  <div className="space-y-2">
+                    {stats.categorySales.map((cat, idx) => (
+                      <div
+                        key={cat.category}
+                        className="p-3 rounded-lg border border-line bg-surface flex items-center justify-between"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span
+                            className="h-3 w-3 rounded-full shrink-0"
+                            style={{ backgroundColor: PIE_COLORS[idx % PIE_COLORS.length] }}
+                          />
+                          <span className="font-semibold text-xs text-ink dark:text-line">
+                            {cat.category}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-4 text-xs">
+                          <span className="text-muted tabular-nums">
+                            {cat.percentage.toFixed(1)}%
+                          </span>
+                          <span className="font-bold text-ok tabular-nums">
+                            {formatMoney(cat.amount)}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB: CIERRES DE CAJA */}
+            {activeTab === 'cash-closings' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-bold text-sm text-ink dark:text-line">
+                      Historial de Cierres de Turno
+                    </h3>
+                    <p className="text-xs text-muted">
+                      Descarga los comprobantes de arqueo en PDF
+                    </p>
+                  </div>
+                </div>
+
+                {cashClosings.length === 0 ? (
+                  <EmptyState
+                    icon={<Lock className="h-10 w-10 text-muted" />}
+                    title="No hay cierres de caja"
+                    description="Los cierres de caja registrados desde el POS aparecerán aquí."
+                  />
+                ) : (
+                  <div className="grid gap-3">
+                    {cashClosings.map((closing) => (
+                      <div
+                        key={closing.id}
+                        className="p-4 rounded-xl border border-line bg-surface-2 flex flex-col md:flex-row md:items-center justify-between gap-4"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2 mb-1">
+                            <Lock className="h-4 w-4 text-accent" />
+                            <span className="font-bold text-sm text-ink dark:text-line">
+                              {closing.closing_number}
+                            </span>
+                            <Tag tone="ok">Cerrada</Tag>
+                          </div>
+                          <p className="text-xs text-muted flex items-center gap-1">
+                            <Calendar className="h-3.5 w-3.5" />
+                            {new Date(closing.closed_at).toLocaleString()}
+                          </p>
+                          {closing.cash_opening && (
+                            <p className="text-xs text-muted mt-0.5">
+                              Apertura: {closing.cash_opening.opening_number} (
+                              {formatMoney(closing.cash_opening.opening_amount)})
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Breakdown */}
+                        <div className="flex flex-wrap items-center gap-3 text-xs">
+                          <div className="px-3 py-1.5 rounded-lg border border-line bg-surface">
+                            <span className="text-muted block text-[10px]">Efectivo</span>
+                            <span className="font-bold text-ok tabular-nums">
+                              {formatMoney(closing.cash_amount)}
+                            </span>
+                          </div>
+                          <div className="px-3 py-1.5 rounded-lg border border-line bg-surface">
+                            <span className="text-muted block text-[10px]">Tarjeta</span>
+                            <span className="font-bold text-fg tabular-nums">
+                              {formatMoney(closing.card_amount)}
+                            </span>
+                          </div>
+                          <div className="px-3 py-1.5 rounded-lg border border-line bg-surface">
+                            <span className="text-muted block text-[10px]">Total Ventas</span>
+                            <span className="font-bold text-accent tabular-nums">
+                              {formatMoney(closing.total_sales)}
+                            </span>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            leftIcon={<Download className="h-3.5 w-3.5" />}
+                            onClick={() => generateClosingPDF(closing)}
+                          >
+                            PDF
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </Panel>
     </div>
   );
 }

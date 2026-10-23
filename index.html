@@ -1,13 +1,28 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kitch One — Sistema de Gestión de Restaurante</title>
-    <meta name="description" content="Gestiona tu restaurante con elegancia y eficiencia. Kitch One - El sabor de la excelencia." />
+    <meta name="description" content="Kitch One: punto de venta, órdenes, cocina (KDS), mesas y reportes para restaurantes en un solo panel." />
+    <meta name="color-scheme" content="light dark" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Onest:wght@400;500;600;700&display=swap"
+    />
+    <script>
+      // Aplica el tema antes del primer render para evitar parpadeo.
+      (function () {
+        try {
+          var saved = localStorage.getItem('kitchone-theme');
+          var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (dark) document.documentElement.classList.add('dark');
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

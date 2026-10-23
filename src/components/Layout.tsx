@@ -1,5 +1,5 @@
-import { ReactNode, useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { motion } from 'framer-motion';
 import { useAuth } from '../contexts/AuthContext';
 import {
   LayoutDashboard,
@@ -7,22 +7,28 @@ import {
   UserCheck,
   UtensilsCrossed,
   FolderOpen,
-  DollarSign,
-  ShoppingCart,
+  Wallet,
+  Receipt,
   ChefHat,
   ClipboardList,
   History,
   BarChart3,
   Settings,
   LogOut,
-  Menu,
-  UserCircle2,
-  ChevronLeft,
-  ChevronRight,
-  Check,
-  X
+  Armchair,
+  Search,
+  Moon,
+  Sun,
+  Plus,
+  LockKeyhole,
+  CircleDot,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { useTheme } from '../lib/theme';
+import { initials, ROLE_LABEL, UI_EVENTS, PENDING_NEW_ORDER_KEY, formatClock } from '../lib/format';
+import { cn } from './ui/cn';
+import { Button, IconButton } from './ui/Button';
+import CommandPalette, { type CommandItem } from './CommandPalette';
 
 interface LayoutProps {
   children: ReactNode;
@@ -30,434 +36,367 @@ interface LayoutProps {
   onNavigate: (page: string) => void;
 }
 
-interface RecentOrder {
-  id: string;
-  order_number: string;
-  table_number: string;
-  status: string;
-  created_at: string;
-}
-
 interface MenuItem {
   id: string;
   label: string;
-  icon: ReactNode;
+  icon: (cls: string) => ReactNode;
   roles: string[];
+  badge?: 'open' | 'kitchen';
+}
+
+interface MenuGroup {
+  label: string;
+  items: MenuItem[];
+}
+
+const GROUPS: MenuGroup[] = [
+  {
+    label: 'Operación',
+    items: [
+      { id: 'dashboard', label: 'Panel', icon: (c) => <LayoutDashboard className={c} />, roles: ['admin', 'mesero', 'cocinero'] },
+      { id: 'orders', label: 'Órdenes', icon: (c) => <ClipboardList className={c} />, roles: ['admin', 'mesero'], badge: 'open' },
+      { id: 'kitchen', label: 'Cocina', icon: (c) => <ChefHat className={c} />, roles: ['admin', 'cocinero'], badge: 'kitchen' },
+      { id: 'sales', label: 'Facturación', icon: (c) => <Receipt className={c} />, roles: ['admin', 'mesero'] },
+      { id: 'tables', label: 'Mesas', icon: (c) => <Armchair className={c} />, roles: ['admin'] },
+    ],
+  },
+  {
+    label: 'Gestión',
+    items: [
+      { id: 'dishes', label: 'Platillos', icon: (c) => <UtensilsCrossed className={c} />, roles: ['admin'] },
+      { id: 'categories', label: 'Categorías', icon: (c) => <FolderOpen className={c} />, roles: ['admin'] },
+      { id: 'expenses', label: 'Gastos', icon: (c) => <Wallet className={c} />, roles: ['admin'] },
+      { id: 'customers', label: 'Clientes', icon: (c) => <UserCheck className={c} />, roles: ['admin', 'mesero'] },
+      { id: 'reports', label: 'Reportes', icon: (c) => <BarChart3 className={c} />, roles: ['admin'] },
+      { id: 'history', label: 'Historial', icon: (c) => <History className={c} />, roles: ['admin'] },
+      { id: 'users', label: 'Usuarios', icon: (c) => <Users className={c} />, roles: ['admin'] },
+    ],
+  },
+  {
+    label: 'Cuenta',
+    items: [{ id: 'config', label: 'Configuración', icon: (c) => <Settings className={c} />, roles: ['admin'] }],
+  },
+];
+
+interface CashState {
+  open: boolean;
+  since?: string;
+}
+
+function Logo({ compact }: { compact?: boolean }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      {/* El degradado de marca se reserva solo para el logo */}
+      <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gradient-to-br from-[#F07A2E] to-[#C9420A] text-white">
+        <ChefHat className="h-5 w-5" aria-hidden />
+      </span>
+      {!compact && (
+        <span className="leading-tight">
+          <span className="block font-display text-[17px] font-bold text-fg">Kitch One</span>
+          <span className="block text-[11px] font-medium text-muted">Gestión de restaurante</span>
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default function Layout({ children, currentPage, onNavigate }: LayoutProps) {
   const { profile, signOut } = useAuth();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
+  const { theme, toggle } = useTheme();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [counts, setCounts] = useState({ open: 0, kitchen: 0 });
+  const [cash, setCash] = useState<CashState | null>(null);
 
-  // Órdenes recientes solo para el panel del dashboard
+  const canSee = useCallback(
+    (item: MenuItem) => {
+      if (!profile) return false;
+      // Si el usuario tiene módulos personalizados se respetan; si no, se usa el rol.
+      if (profile.allowed_modules && profile.allowed_modules.length > 0) {
+        return profile.allowed_modules.includes(item.id);
+      }
+      return item.roles.includes(profile.role);
+    },
+    [profile]
+  );
+
+  const groups = useMemo(
+    () => GROUPS.map((g) => ({ ...g, items: g.items.filter(canSee) })).filter((g) => g.items.length > 0),
+    [canSee]
+  );
+  const flatItems = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+  const canOrder = flatItems.some((i) => i.id === 'orders');
+  const canBill = flatItems.some((i) => i.id === 'sales');
+
+  /* ---------- Conteo de órdenes abiertas para badges (solo lectura) ---------- */
   useEffect(() => {
-    if (currentPage !== 'dashboard') return;
+    if (!profile) return;
+    let alive = true;
+    const load = async () => {
+      const { data } = await supabase.from('orders').select('id, status').in('status', ['pendiente', 'en_preparacion', 'terminado']);
+      if (!alive || !data) return;
+      const rows = data as Array<{ status: string }>;
+      setCounts({
+        open: rows.length,
+        kitchen: rows.filter((r) => r.status === 'pendiente' || r.status === 'en_preparacion').length,
+      });
+    };
+    load();
+    const channel = supabase
+      .channel('layout-order-counts')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => load())
+      .subscribe();
+    const onLocal = () => load();
+    window.addEventListener(UI_EVENTS.ordersChanged, onLocal);
+    return () => {
+      alive = false;
+      supabase.removeChannel(channel);
+      window.removeEventListener(UI_EVENTS.ordersChanged, onLocal);
+    };
+  }, [profile]);
 
-    const loadRecentOrders = async () => {
+  /* ---------------- Estado de caja (misma consulta que Facturación) ---------------- */
+  useEffect(() => {
+    if (!canBill) return;
+    let alive = true;
+    const load = async () => {
       try {
-        const { data } = await supabase
-          .from('orders')
-          .select('id, order_number, tables(table_number), status, created_at')
-          .order('created_at', { ascending: false })
-          .limit(3);
-        
-        const mappedOrders = (data || []).map((o: any) => ({
-          id: o.id,
-          order_number: o.order_number,
-          table_number: o.tables?.table_number || '',
-          status: o.status,
-          created_at: o.created_at,
-        }));
-        
-        setRecentOrders(mappedOrders);
-      } catch (error) {
-        console.error('Error loading recent orders:', error);
+        const today = new Date().toISOString().split('T')[0];
+        const { data, error } = await supabase
+          .from('cash_openings')
+          .select('*')
+          .gte('opened_at', today)
+          .order('opened_at', { ascending: false })
+          .limit(1);
+        if (error) throw error;
+        if (!alive) return;
+        if (data && data.length > 0) {
+          const opening = data[0] as { id: string; opened_at: string };
+          const { data: closing } = await supabase.from('cash_closings').select('id').eq('opening_id', opening.id).maybeSingle();
+          if (!alive) return;
+          setCash(closing ? { open: false } : { open: true, since: opening.opened_at });
+        } else {
+          setCash({ open: false });
+        }
+      } catch {
+        if (alive) setCash(null);
       }
     };
-    
-    loadRecentOrders();
-  }, [currentPage]);
+    load();
+    window.addEventListener(UI_EVENTS.cashChanged, load);
+    return () => {
+      alive = false;
+      window.removeEventListener(UI_EVENTS.cashChanged, load);
+    };
+  }, [canBill]);
 
-  const menuItems: MenuItem[] = [
-    { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" />, roles: ['admin', 'mesero', 'cocinero'] },
-    { id: 'users', label: 'Usuarios', icon: <Users className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'customers', label: 'Clientes', icon: <UserCheck className="w-5 h-5" />, roles: ['admin', 'mesero'] },
-    { id: 'categories', label: 'Categorías', icon: <FolderOpen className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'dishes', label: 'Platillos', icon: <UtensilsCrossed className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'tables', label: 'Mesas', icon: <Menu className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'expenses', label: 'Gastos', icon: <DollarSign className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'sales', label: 'Facturación', icon: <ShoppingCart className="w-5 h-5" />, roles: ['admin', 'mesero'] },
-    { id: 'orders', label: 'Órdenes', icon: <ClipboardList className="w-5 h-5" />, roles: ['admin', 'mesero'] },
-    { id: 'kitchen', label: 'Cocina', icon: <ChefHat className="w-5 h-5" />, roles: ['admin', 'cocinero'] },
-    { id: 'history', label: 'Historial', icon: <History className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'reports', label: 'Reportes', icon: <BarChart3 className="w-5 h-5" />, roles: ['admin'] },
-    { id: 'config', label: 'Configuración', icon: <Settings className="w-5 h-5" />, roles: ['admin'] },
-  ];
+  /* --------------------------------- ⌘K --------------------------------- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
-  const filteredMenuItems = menuItems.filter(item => {
-    if (!profile) return false;
-    // If user has customized allowed_modules, use them. Otherwise fallback to default roles.
-    if (profile.allowed_modules && profile.allowed_modules.length > 0) {
-      return profile.allowed_modules.includes(item.id);
-    }
-    return item.roles.includes(profile.role);
-  });
+  const startNewOrder = useCallback(() => {
+    sessionStorage.setItem(PENDING_NEW_ORDER_KEY, '1');
+    if (currentPage === 'orders') window.dispatchEvent(new CustomEvent(UI_EVENTS.newOrder));
+    else onNavigate('orders');
+  }, [currentPage, onNavigate]);
 
-  const sidebarVariants = {
-    open: { x: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 30 } },
-    closed: { x: '-100%', transition: { type: 'spring' as const, stiffness: 300, damping: 30 } },
+  const commands: CommandItem[] = useMemo(() => {
+    const nav = groups.flatMap((g) =>
+      g.items.map<CommandItem>((i) => ({
+        id: `nav-${i.id}`,
+        label: i.label,
+        group: g.label,
+        icon: i.icon('h-4 w-4'),
+        hint: 'Ir a',
+        run: () => onNavigate(i.id),
+      }))
+    );
+    const actions: CommandItem[] = [
+      ...(canOrder ? [{ id: 'act-new-order', label: 'Nueva orden', group: 'Acciones', icon: <Plus className="h-4 w-4" />, keywords: 'crear pedido mesa', run: startNewOrder }] : []),
+      { id: 'act-theme', label: theme === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro', group: 'Acciones', icon: theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />, keywords: 'modo oscuro claro tema', run: toggle },
+      { id: 'act-logout', label: 'Cerrar sesión', group: 'Acciones', icon: <LogOut className="h-4 w-4" />, keywords: 'salir', run: signOut },
+    ];
+    return [...actions, ...nav];
+  }, [groups, onNavigate, canOrder, startNewOrder, theme, toggle, signOut]);
+
+  const badgeFor = (item: MenuItem) => (item.badge === 'open' ? counts.open : item.badge === 'kitchen' ? counts.kitchen : 0);
+
+  const NavButton = ({ item, mobile }: { item: MenuItem; mobile?: boolean }) => {
+    const active = currentPage === item.id;
+    const badge = badgeFor(item);
+    return (
+      <button
+        type="button"
+        onClick={() => onNavigate(item.id)}
+        aria-current={active ? 'page' : undefined}
+        className={cn(
+          'relative flex items-center gap-3 font-medium transition-colors',
+          mobile
+            ? 'h-9 shrink-0 rounded-full px-3.5 text-[13px]'
+            : 'h-10 w-full rounded-[10px] px-3 text-sm',
+          active ? 'bg-accent-soft text-accent-strong' : 'text-muted hover:bg-surface-2 hover:text-fg'
+        )}
+      >
+        {!mobile && active && (
+          <motion.span layoutId="nav-active-bar" className="absolute -left-3 top-2 bottom-2 w-[3px] rounded-r-full bg-accent" transition={{ type: 'spring', stiffness: 420, damping: 36 }} />
+        )}
+        {item.icon(cn('h-[18px] w-[18px] shrink-0', mobile && 'h-4 w-4'))}
+        <span className={cn(!mobile && 'flex-1 text-left')}>{item.label}</span>
+        {badge > 0 && (
+          <span
+            className={cn(
+              'tnum inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-[11px] font-bold',
+              active ? 'bg-accent-strong text-accent-on' : 'bg-surface-2 text-fg ring-1 ring-line'
+            )}
+            aria-label={`${badge} abiertas`}
+          >
+            {badge}
+          </span>
+        )}
+      </button>
+    );
   };
 
-  const navItemVariants = {
-    initial: { opacity: 0, x: -12 },
-    animate: (i: number) => ({
-      opacity: 1,
-      x: 0,
-      transition: { delay: i * 0.04, duration: 0.3, ease: 'easeOut' as const },
-    }),
+  const CashChip = ({ compact }: { compact?: boolean }) => {
+    if (!canBill || !cash) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => onNavigate('sales')}
+        className={cn(
+          'inline-flex h-9 items-center gap-2 rounded-full border px-3 text-[13px] font-medium transition-colors',
+          cash.open ? 'border-ok/30 bg-ok-soft text-ok hover:border-ok/60' : 'border-line bg-surface text-muted hover:text-fg'
+        )}
+        title={cash.open ? 'Ir a Facturación' : 'Abrir caja en Facturación'}
+      >
+        {cash.open ? <CircleDot className="h-3.5 w-3.5" aria-hidden /> : <LockKeyhole className="h-3.5 w-3.5" aria-hidden />}
+        {cash.open ? (
+          <span className="tnum">
+            Caja abierta{!compact && cash.since ? ` · desde ${formatClock(cash.since)}` : ''}
+          </span>
+        ) : (
+          <span>Caja cerrada</span>
+        )}
+      </button>
+    );
   };
+
+  const ThemeToggle = () => (
+    <IconButton label={theme === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro'} onClick={toggle} variant="outline" size="md">
+      {theme === 'dark' ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
+    </IconButton>
+  );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50/30">
-      {/* Desktop Sidebar */}
-      <div className="hidden lg:block fixed inset-y-0 left-0 z-50 w-64">
-        <div className="flex flex-col h-full bg-white/80 backdrop-blur-xl border-r border-slate-200/60 shadow-[4px_0_24px_-2px_rgba(0,0,0,0.04)]">
-          {/* Logo */}
-          <div className="flex items-center space-x-3 p-6 border-b border-slate-100">
-            <motion.div
-              whileHover={{ scale: 1.05, rotate: 3 }}
-              whileTap={{ scale: 0.95 }}
-              className="w-10 h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-orange-500/25"
-            >
-              <ChefHat className="w-5 h-5 text-white" />
-            </motion.div>
-            <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-slate-800 to-slate-600 bg-clip-text text-transparent">
-                Kitch One
-              </h1>
-              <p className="text-[10px] font-medium text-slate-400 tracking-wider uppercase">Restaurant System</p>
-            </div>
-          </div>
+    <div className="min-h-screen bg-bg">
+      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[90] focus:rounded-lg focus:bg-surface focus:px-3 focus:py-2 focus:text-sm focus:font-semibold">
+        Saltar al contenido
+      </a>
 
-          {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto p-3 hide-scrollbar">
-            <div className="space-y-0.5">
-              {filteredMenuItems.map((item, i) => {
-                const isActive = currentPage === item.id;
-                return (
-                  <motion.button
-                    key={item.id}
-                    custom={i}
-                    variants={navItemVariants}
-                    initial="initial"
-                    animate="animate"
-                    whileHover={{ x: 4 }}
-                    whileTap={{ scale: 0.97 }}
-                    onClick={() => onNavigate(item.id)}
-                    className={`relative w-full flex items-center space-x-3 px-4 py-2.5 rounded-xl transition-all duration-200 group ${
-                      isActive
-                        ? 'text-orange-600'
-                        : 'text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    {/* Active background pill */}
-                    {isActive && (
-                      <motion.div
-                        layoutId="activeNavBg"
-                        className="absolute inset-0 bg-gradient-to-r from-orange-50 to-amber-50 rounded-xl border border-orange-100/60"
-                        transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                      />
-                    )}
-                    {/* Active left indicator */}
-                    {isActive && (
-                      <motion.div
-                        layoutId="activeNavIndicator"
-                        className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-gradient-to-b from-orange-500 to-amber-500 rounded-full"
-                        transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                      />
-                    )}
-                    <span className={`relative z-10 transition-colors duration-200 ${isActive ? 'text-orange-600' : 'text-slate-400 group-hover:text-slate-600'}`}>
-                      {item.icon}
-                    </span>
-                    <span className="relative z-10 font-medium text-sm">{item.label}</span>
-                  </motion.button>
-                );
-              })}
-            </div>
-          </nav>
-
-          {/* User & Logout */}
-          <div className="p-4 border-t border-slate-100">
-            <div className="flex items-center space-x-3 px-3 py-2 mb-2">
-              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-orange-400 to-rose-400 flex items-center justify-center text-white text-xs font-bold shadow-md shadow-orange-400/20">
-                {profile?.full_name?.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) || 'U'}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-slate-700 truncate">{profile?.full_name || 'Usuario'}</p>
-                <p className="text-xs text-slate-400 capitalize">{profile?.role || 'admin'}</p>
-              </div>
-            </div>
-            <motion.button
-              whileHover={{ x: 4 }}
-              whileTap={{ scale: 0.97 }}
-              onClick={signOut}
-              className="w-full flex items-center space-x-3 px-4 py-2.5 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50/60 transition-all duration-200"
-            >
-              <LogOut className="w-4 h-4" />
-              <span className="font-medium text-sm">Cerrar Sesión</span>
-            </motion.button>
-          </div>
+      {/* ------------------------------ Sidebar desktop ------------------------------ */}
+      <aside className="fixed inset-y-0 left-0 z-40 hidden w-[248px] flex-col border-r border-line bg-surface lg:flex" aria-label="Navegación principal">
+        <div className="flex h-16 items-center px-5">
+          <Logo />
         </div>
-      </div>
-
-      {/* Mobile Sidebar */}
-      <AnimatePresence>
-        {sidebarOpen && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-40 lg:hidden"
-              onClick={() => setSidebarOpen(false)}
-            />
-            <motion.div
-              variants={sidebarVariants}
-              initial="closed"
-              animate="open"
-              exit="closed"
-              className="fixed inset-y-0 left-0 z-50 w-72 bg-white/95 backdrop-blur-xl shadow-2xl shadow-slate-900/10 lg:hidden"
-            >
-              <div className="flex flex-col h-full">
-                <div className="flex items-center justify-between p-5 border-b border-slate-100">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-orange-500/25">
-                      <ChefHat className="w-5 h-5 text-white" />
-                    </div>
-                    <h1 className="text-lg font-bold text-slate-800">Kitch One</h1>
-                  </div>
-                  <motion.button
-                    whileTap={{ scale: 0.9, rotate: 90 }}
-                    onClick={() => setSidebarOpen(false)}
-                    className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors"
-                  >
-                    <X className="w-5 h-5" />
-                  </motion.button>
-                </div>
-                <nav className="flex-1 overflow-y-auto p-3 hide-scrollbar">
-                  <div className="space-y-0.5">
-                    {filteredMenuItems.map((item, i) => {
-                      const isActive = currentPage === item.id;
-                      return (
-                        <motion.button
-                          key={item.id}
-                          initial={{ opacity: 0, x: -20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: i * 0.05 }}
-                          whileTap={{ scale: 0.97 }}
-                          onClick={() => {
-                            onNavigate(item.id);
-                            setSidebarOpen(false);
-                          }}
-                          className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-                            isActive
-                              ? 'bg-gradient-to-r from-orange-50 to-amber-50 text-orange-600 border border-orange-100/60'
-                              : 'text-slate-500 hover:bg-slate-50'
-                          }`}
-                        >
-                          <span className={isActive ? 'text-orange-500' : 'text-slate-400'}>{item.icon}</span>
-                          <span className="font-medium text-sm">{item.label}</span>
-                        </motion.button>
-                      );
-                    })}
-                  </div>
-                </nav>
-                <div className="p-4 border-t border-slate-100">
-                  <button
-                    onClick={signOut}
-                    className="w-full flex items-center space-x-3 px-4 py-3 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50/60 transition-all"
-                  >
-                    <LogOut className="w-5 h-5" />
-                    <span className="font-medium">Cerrar Sesión</span>
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
-      {/* Mobile Top Bar */}
-      <div className="lg:hidden fixed top-0 left-0 right-0 z-30 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 px-4 py-3">
-        <div className="flex items-center justify-between">
-          <motion.button
-            whileTap={{ scale: 0.9 }}
-            onClick={() => setSidebarOpen(true)}
-            className="p-2 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors"
-          >
-            <Menu className="w-5 h-5" />
-          </motion.button>
-          <div className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg flex items-center justify-center">
-              <ChefHat className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-bold text-slate-800">Kitch One</span>
-          </div>
-          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-orange-400 to-rose-400 flex items-center justify-center text-white text-xs font-bold">
-            {profile?.full_name?.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) || 'U'}
-          </div>
-        </div>
-      </div>
-
-      {/* Main Content */}
-      <div className="lg:pl-64">
-        <div className="flex flex-col lg:flex-row lg:items-start min-h-0">
-          <main className="flex-1 min-w-0 p-4 pt-20 pb-8 lg:p-6 lg:pt-6">
-            {children}
-          </main>
-          {currentPage === 'dashboard' && (
-          <aside className="w-full lg:max-w-sm xl:max-w-md shrink-0 p-4 lg:p-6 lg:pb-8 space-y-6 border-t lg:border-t-0 lg:border-l border-slate-200/50 bg-slate-50/40 lg:bg-transparent">
-            {/* Perfil de Usuario */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-              className="mb-6"
-            >
-              <div className="flex items-center space-x-3 mb-4">
-                {profile?.full_name ? (
-                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-orange-400 via-rose-400 to-violet-400 text-white flex items-center justify-center text-sm font-bold shadow-lg shadow-orange-400/20">
-                    {profile.full_name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
-                  </div>
-                ) : (
-                  <UserCircle2 className="w-12 h-12 text-slate-300" />
-                )}
-                <div>
-                  <h3 className="font-semibold text-slate-800">{profile?.full_name || 'Sara Abraham'}</h3>
-                  <button className="text-sm text-orange-500 hover:text-orange-600 font-medium transition-colors">Ver perfil</button>
-                </div>
-              </div>
-            </motion.div>
-
-            {/* Calendario de Programación */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-              className="mb-6"
-            >
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-slate-800">Calendario</h3>
-                <div className="flex items-center space-x-1">
-                  <motion.button whileTap={{ scale: 0.9 }} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
-                    <ChevronLeft className="w-4 h-4 text-slate-500" />
-                  </motion.button>
-                  <span className="px-3 py-1 text-sm bg-orange-50 text-orange-600 rounded-lg font-medium">Mayo</span>
-                  <motion.button whileTap={{ scale: 0.9 }} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
-                    <ChevronRight className="w-4 h-4 text-slate-500" />
-                  </motion.button>
-                </div>
-              </div>
-              <div className="bg-slate-50/80 rounded-2xl p-4 border border-slate-100">
-                <div className="grid grid-cols-5 gap-2 text-center text-xs font-semibold text-slate-400 mb-2">
-                  <div>Lun</div>
-                  <div>Mar</div>
-                  <div>Mié</div>
-                  <div>Jue</div>
-                  <div>Vie</div>
-                </div>
-                <div className="grid grid-cols-5 gap-2 text-center">
-                  {[22, 23, 24, 25, 26].map(day => (
-                    <motion.div
-                      key={day}
-                      whileHover={{ scale: 1.15 }}
-                      whileTap={{ scale: 0.9 }}
-                      className={`p-2 text-sm rounded-xl cursor-pointer transition-all duration-200 font-medium ${
-                        day === 24
-                          ? 'bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/25'
-                          : 'text-slate-600 hover:bg-white hover:shadow-sm'
-                      }`}
-                    >
-                      {day}
-                    </motion.div>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-
-            {/* Nuevas Órdenes */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3 }}
-              className="mb-6"
-            >
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-slate-800">Nuevas Órdenes</h3>
-                <button className="text-sm text-orange-500 hover:text-orange-600 font-medium transition-colors">Ver Todo</button>
-              </div>
-              <div className="space-y-2">
-                {recentOrders.slice(0, 3).map((order, i) => (
-                  <motion.div
-                    key={order.id}
-                    initial={{ opacity: 0, x: 10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.3 + i * 0.08 }}
-                    whileHover={{ x: 3, transition: { duration: 0.15 } }}
-                    className="flex items-center space-x-3 p-3 bg-slate-50/80 rounded-xl border border-slate-100 hover:bg-white hover:shadow-sm transition-all duration-200 cursor-pointer"
-                  >
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
-                      <ClipboardList className="w-4 h-4 text-blue-600" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-slate-700">Orden {order.order_number}</p>
-                      <p className="text-xs text-slate-400">Mesa {order.table_number}</p>
-                    </div>
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    </div>
-                  </motion.div>
+        <nav className="custom-scrollbar flex-1 overflow-y-auto px-3 pb-4 pt-2">
+          {groups.map((g) => (
+            <div key={g.label} className="mb-5 last:mb-0">
+              <p className="eyebrow mb-1.5 px-3">{g.label}</p>
+              <ul className="space-y-0.5">
+                {g.items.map((item) => (
+                  <li key={item.id}>
+                    <NavButton item={item} />
+                  </li>
                 ))}
-              </div>
-            </motion.div>
-
-            {/* Listos para Servir */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4 }}
-            >
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-slate-800">Listos para Servir</h3>
-                <button className="text-sm text-orange-500 hover:text-orange-600 font-medium transition-colors">Ver Todo</button>
-              </div>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between p-3 bg-emerald-50/60 rounded-xl border border-emerald-100">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-100 to-green-100 flex items-center justify-center">
-                      <Check className="w-4 h-4 text-emerald-600" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-semibold text-slate-700">Órdenes Listas</p>
-                      <p className="text-xs text-slate-400">0 completadas</p>
-                    </div>
-                  </div>
-                </div>
-                <motion.button
-                  whileHover={{ scale: 1.01, y: -1 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white py-2.5 rounded-xl font-semibold text-sm shadow-lg shadow-orange-500/25 hover:shadow-xl hover:shadow-orange-500/30 transition-shadow duration-300"
-                >
-                  Ver Cocina
-                </motion.button>
-              </div>
-            </motion.div>
-          </aside>
-          )}
+              </ul>
+            </div>
+          ))}
+        </nav>
+        <div className="border-t border-line p-3">
+          <div className="flex items-center gap-3 rounded-[12px] px-2 py-2">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-xs font-bold text-ink-on" aria-hidden>
+              {initials(profile?.full_name)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold text-fg">{profile?.full_name || 'Usuario'}</p>
+              <p className="text-xs text-muted">{ROLE_LABEL[profile?.role ?? ''] ?? profile?.role}</p>
+            </div>
+            <IconButton label="Cerrar sesión" size="sm" onClick={signOut}>
+              <LogOut className="h-4 w-4" />
+            </IconButton>
+          </div>
         </div>
+      </aside>
+
+      <div className="lg:pl-[248px]">
+        {/* ------------------------------ Barra superior ------------------------------ */}
+        <header className="sticky top-0 z-30 border-b border-line bg-bg/95 backdrop-blur-sm">
+          <div className="flex h-16 items-center gap-3 px-4 sm:px-6">
+            <div className="lg:hidden">
+              <Logo compact />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              className="hidden h-10 w-full max-w-md items-center gap-2.5 rounded-[10px] border border-line bg-surface px-3 text-sm text-muted transition-colors hover:border-line-strong sm:flex"
+              aria-label="Abrir búsqueda global"
+            >
+              <Search className="h-4 w-4" aria-hidden />
+              <span className="flex-1 text-left">Buscar páginas y acciones…</span>
+              <span className="kbd">⌘K</span>
+            </button>
+
+            <div className="ml-auto flex items-center gap-2">
+              <IconButton label="Buscar" className="sm:hidden" onClick={() => setPaletteOpen(true)}>
+                <Search className="h-5 w-5" />
+              </IconButton>
+              <div className="hidden md:block">
+                <CashChip />
+              </div>
+              <ThemeToggle />
+              {canOrder && (
+                <>
+                  <Button variant="acc" leftIcon={<Plus className="h-4 w-4" />} onClick={startNewOrder} className="hidden sm:inline-flex">
+                    Nueva orden
+                  </Button>
+                  <IconButton label="Nueva orden" variant="pri" className="sm:hidden" onClick={startNewOrder}>
+                    <Plus className="h-5 w-5" />
+                  </IconButton>
+                </>
+              )}
+              <IconButton label="Cerrar sesión" className="lg:hidden" onClick={signOut}>
+                <LogOut className="h-[18px] w-[18px]" />
+              </IconButton>
+            </div>
+          </div>
+
+          {/* Navegación móvil: barra horizontal con scroll */}
+          <nav className="hide-scrollbar flex gap-1.5 overflow-x-auto border-t border-line px-4 py-2 lg:hidden" aria-label="Navegación principal">
+            {flatItems.map((item) => (
+              <NavButton key={item.id} item={item} mobile />
+            ))}
+          </nav>
+          {canBill && cash && (
+            <div className="border-t border-line px-4 py-2 md:hidden">
+              <CashChip compact />
+            </div>
+          )}
+        </header>
+
+        <main id="main" className="mx-auto w-full max-w-[1600px] px-4 pb-16 pt-6 sm:px-6 lg:pt-8">
+          {children}
+        </main>
       </div>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} items={commands} />
     </div>
   );
 }

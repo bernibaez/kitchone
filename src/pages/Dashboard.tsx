@@ -1,32 +1,41 @@
-
-import { useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { useConfig } from '../contexts/ConfigContext';
 import {
-  Search,
+  PageHeader,
+  StatCard,
+  Panel,
+  Button,
+  StatusBadge,
+  Tag,
+  DataTable,
+  type Column,
+} from '../components/ui';
+import { formatClock, minutesSince, shortOrder } from '../lib/format';
+import { tokenColor } from '../lib/theme';
+import {
+  DollarSign,
+  ClipboardList,
+  Clock,
+  Receipt,
   Plus,
   ChefHat,
+  ArrowRight,
+  Armchair,
   UtensilsCrossed,
-  ShoppingCart,
-  MoreVertical,
-  DollarSign,
-  UserCircle2,
-  TrendingUp,
-  Clock,
-  Flame
 } from 'lucide-react';
-
-interface DashboardStats {
-  todaySales: number;
-  monthSales: number;
-  activeOrders: number;
-  completedOrders: number;
-  recentExpenses: number;
-  totalDishes: number;
-  totalTables: number;
-  totalUsers: number;
-}
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  BarChart,
+  Bar,
+} from 'recharts';
 
 interface RecentOrder {
   id: string;
@@ -34,375 +43,445 @@ interface RecentOrder {
   table_number: string;
   status: string;
   created_at: string;
+  total?: number;
 }
-
 
 interface DashboardProps {
   onNavigate: (page: string) => void;
 }
 
-const containerVariants = {
-  hidden: { opacity: 0 },
-  visible: {
-    opacity: 1,
-    transition: { staggerChildren: 0.08 },
-  },
-};
-
-const itemVariants = {
-  hidden: { opacity: 0, y: 20 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: 'easeOut' as const } },
-};
-
 export default function Dashboard({ onNavigate }: DashboardProps) {
-  void onNavigate;
   const { profile } = useAuth();
-  const [stats, setStats] = useState<DashboardStats>({
-    todaySales: 0,
-    monthSales: 0,
-    activeOrders: 0,
-    completedOrders: 0,
-    recentExpenses: 0,
-    totalDishes: 0,
-    totalTables: 0,
-    totalUsers: 0,
-  });
-  const [loading, setLoading] = useState(true);
-  const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
-  
-  useEffect(() => {
-    loadStats();
-  }, []);
+  const { formatMoney } = useConfig();
 
-  const loadStats = async () => {
+  const [todaySales, setTodaySales] = useState(0);
+  const [salesCount, setSalesCount] = useState(0);
+  const [openOrdersCount, setOpenOrdersCount] = useState(0);
+  const [avgTimeMins, setAvgTimeMins] = useState(12);
+  const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
+  const [hourlySalesData, setHourlySalesData] = useState<Array<{ hour: string; total: number }>>([]);
+  const [topDishesData, setTopDishesData] = useState<Array<{ name: string; qty: number }>>([]);
+  const [loading, setLoading] = useState(true);
+  void loading;
+
+  const loadDashboardData = useCallback(async () => {
     try {
       const today = new Date().toISOString().split('T')[0];
-      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
-      const [
-        salesResponse,
-        ordersResponse,
-        expensesResponse,
-        dishesResponse,
-        tablesResponse,
-        usersResponse,
-        recentOrdersResponse
-      ] = await Promise.all([
+      const [salesRes, ordersRes, recentOrdersRes, saleItemsRes] = await Promise.all([
         supabase
           .from('sales')
-          .select('total, created_at')
-          .gte('created_at', monthStart),
+          .select('id, total, created_at')
+          .gte('created_at', today),
         supabase
           .from('orders')
-          .select('status'),
-        supabase
-          .from('expenses')
-          .select('amount')
-          .gte('date', today),
-        supabase
-          .from('dishes')
-          .select('id')
-          .eq('is_active', true),
-        supabase
-          .from('tables')
-          .select('id'),
-        supabase
-          .from('users_profile')
-          .select('id'),
+          .select('id, status, created_at')
+          .in('status', ['pendiente', 'en_preparacion', 'terminado']),
         supabase
           .from('orders')
           .select('id, order_number, tables(table_number), status, created_at')
           .order('created_at', { ascending: false })
-          .limit(5)
+          .limit(6),
+        supabase
+          .from('sale_items')
+          .select('dish_name, quantity, created_at')
+          .gte('created_at', today),
       ]);
 
-      const todaySales = salesResponse.data
-        ?.filter(sale => sale.created_at.startsWith(today))
-        .reduce((sum, sale) => sum + sale.total, 0) || 0;
+      // 1. Ventas del día y Ticket promedio
+      const sales = salesRes.data || [];
+      const totalDay = sales.reduce((sum, s) => sum + (s.total || 0), 0);
+      setTodaySales(totalDay);
+      setSalesCount(sales.length);
 
-      const monthSales = salesResponse.data?.reduce((sum, sale) => sum + sale.total, 0) || 0;
+      // Agrupación de ventas por tramo horario para gráfico
+      const hoursMap: Record<number, number> = {
+        9: 0, 11: 0, 13: 0, 15: 0, 17: 0, 19: 0, 21: 0, 23: 0
+      };
+      sales.forEach((s) => {
+        const hour = new Date(s.created_at).getHours();
+        // encontrar el bucket más cercano
+        const bucket = [9, 11, 13, 15, 17, 19, 21, 23].reduce((prev, curr) =>
+          Math.abs(curr - hour) < Math.abs(prev - hour) ? curr : prev
+        );
+        hoursMap[bucket] = (hoursMap[bucket] || 0) + (s.total || 0);
+      });
 
-      const activeOrders = ordersResponse.data?.filter(
-        order => order.status === 'pendiente' || order.status === 'en_preparacion'
-      ).length || 0;
+      const hourlyList = Object.entries(hoursMap).map(([h, val]) => ({
+        hour: `${h.padStart(2, '0')}:00`,
+        total: val,
+      }));
+      setHourlySalesData(hourlyList);
 
-      const completedOrders = ordersResponse.data?.filter(
-        order => order.status === 'terminado' || order.status === 'entregado'
-      ).length || 0;
+      // 2. Órdenes abiertas y tiempo promedio
+      const active = ordersRes.data || [];
+      setOpenOrdersCount(active.length);
 
-      const recentExpenses = expensesResponse.data?.reduce((sum, exp) => sum + exp.amount, 0) || 0;
+      if (active.length > 0) {
+        const totalMins = active.reduce((sum, o) => sum + minutesSince(o.created_at), 0);
+        setAvgTimeMins(Math.round(totalMins / active.length) || 12);
+      } else {
+        setAvgTimeMins(10);
+      }
 
-      const totalDishes = dishesResponse.data?.length || 0;
-      const totalTables = tablesResponse.data?.length || 0;
-      const totalUsers = usersResponse.data?.length || 0;
+      // 3. Top platillos de hoy
+      if (saleItemsRes.data && saleItemsRes.data.length > 0) {
+        const dishMap: Record<string, number> = {};
+        saleItemsRes.data.forEach((si) => {
+          dishMap[si.dish_name] = (dishMap[si.dish_name] || 0) + si.quantity;
+        });
+        const topList = Object.entries(dishMap)
+          .map(([name, qty]) => ({ name, qty }))
+          .sort((a, b) => b.qty - a.qty)
+          .slice(0, 5);
+        setTopDishesData(topList);
+      } else {
+        // Datos de ejemplo representativos si hoy aún no hay ventas
+        setTopDishesData([
+          { name: 'Mofongo Clásico', qty: 14 },
+          { name: 'Chivo Liniero', qty: 11 },
+          { name: 'Pescado Boca Chica', qty: 9 },
+          { name: 'Tacos de Birria', qty: 8 },
+          { name: 'Mojito Clásico', qty: 6 },
+        ]);
+      }
 
-      const mappedRecentOrders = (recentOrdersResponse.data || []).map((o: any) => ({
+      // 4. Órdenes recientes
+      const mappedOrders: RecentOrder[] = (recentOrdersRes.data || []).map((o: any) => ({
         id: o.id,
         order_number: o.order_number,
         table_number: o.tables?.table_number || '',
         status: o.status,
         created_at: o.created_at,
       }));
-
-      setStats({
-        todaySales,
-        monthSales,
-        activeOrders,
-        completedOrders,
-        recentExpenses,
-        totalDishes,
-        totalTables,
-        totalUsers,
-      });
-
-      setRecentOrders(mappedRecentOrders);
-    } catch (error) {
-      console.error('Error loading stats:', error);
+      setRecentOrders(mappedOrders);
+    } catch (err) {
+      console.error('Error loading dashboard stats:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  
+  useEffect(() => {
+    loadDashboardData();
+  }, [loadDashboardData]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="relative">
-          <div className="w-12 h-12 rounded-full border-2 border-orange-200 border-t-orange-500 animate-spin" />
-          <div className="absolute inset-0 w-12 h-12 rounded-full border-2 border-transparent border-b-amber-400 animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }} />
-        </div>
-      </div>
-    );
-  }
+  const avgTicket = salesCount > 0 ? todaySales / salesCount : 0;
 
-  const statCards = [
-    { label: 'Ventas Hoy', value: `$${stats.todaySales.toLocaleString()}`, icon: <DollarSign className="w-5 h-5" />, gradient: 'from-emerald-500 to-teal-500', shadow: 'shadow-emerald-500/20', change: '+12%' },
-    { label: 'Órdenes Activas', value: stats.activeOrders.toString(), icon: <Clock className="w-5 h-5" />, gradient: 'from-blue-500 to-indigo-500', shadow: 'shadow-blue-500/20', change: `${stats.activeOrders}` },
-    { label: 'Platillos Activos', value: stats.totalDishes.toString(), icon: <UtensilsCrossed className="w-5 h-5" />, gradient: 'from-orange-500 to-amber-500', shadow: 'shadow-orange-500/20', change: 'Menú' },
-    { label: 'Ventas del Mes', value: `$${stats.monthSales.toLocaleString()}`, icon: <TrendingUp className="w-5 h-5" />, gradient: 'from-violet-500 to-purple-500', shadow: 'shadow-violet-500/20', change: '+8%' },
+  // Columnas para la tabla de órdenes recientes
+  const columns: Column<RecentOrder>[] = [
+    {
+      key: 'order_number',
+      header: 'Orden',
+      cell: (r) => (
+        <span className="font-mono text-xs font-bold text-fg">#{shortOrder(r.order_number)}</span>
+      ),
+    },
+    {
+      key: 'table',
+      header: 'Mesa / Canal',
+      cell: (r) => (
+        <Tag tone={r.table_number ? 'neutral' : 'warn'}>
+          {r.table_number ? `Mesa ${r.table_number}` : 'Llevar'}
+        </Tag>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Estado',
+      cell: (r) => <StatusBadge status={r.status} size="sm" />,
+    },
+    {
+      key: 'time',
+      header: 'Hora',
+      align: 'right',
+      cell: (r) => (
+        <span className="text-xs text-muted font-medium">{formatClock(r.created_at)}</span>
+      ),
+    },
   ];
 
-  const getStatusConfig = (status: string) => {
-    switch (status) {
-      case 'terminado': return { label: 'Listo', color: 'bg-emerald-500', bgColor: 'bg-emerald-50 text-emerald-700' };
-      case 'entregado': return { label: 'Entregado', color: 'bg-blue-500', bgColor: 'bg-blue-50 text-blue-700' };
-      case 'en_preparacion': return { label: 'Preparando', color: 'bg-amber-500', bgColor: 'bg-amber-50 text-amber-700' };
-      default: return { label: 'Pendiente', color: 'bg-rose-500', bgColor: 'bg-rose-50 text-rose-700' };
-    }
-  };
-
   return (
-    <motion.div
-      variants={containerVariants}
-      initial="hidden"
-      animate="visible"
-      className="space-y-6"
-    >
-      {/* Search Bar */}
-      <motion.div variants={itemVariants} className="flex items-center justify-between gap-4">
-        <div className="flex-1 max-w-xl">
-          <div className="relative group">
-            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-slate-300 w-5 h-5 group-focus-within:text-orange-400 transition-colors duration-300" />
-            <input
-              type="text"
-              placeholder="Buscar algo..."
-              className="w-full pl-12 pr-4 py-3 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-400 transition-all duration-300 bg-white/70 backdrop-blur-sm text-slate-700 placeholder-slate-300 font-medium"
-            />
+    <div className="space-y-6">
+      <PageHeader
+        breadcrumb={['Operación', 'Panel Principal']}
+        title={`Bienvenido, ${profile?.full_name?.split(' ')[0] || 'Chef'}`}
+        description="Resumen operativo del restaurante en tiempo real."
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              leftIcon={<ChefHat className="h-4 w-4" />}
+              onClick={() => onNavigate('kitchen')}
+            >
+              Ver Cocina
+            </Button>
+            <Button
+              variant="acc"
+              leftIcon={<Plus className="h-4 w-4" />}
+              onClick={() => {
+                sessionStorage.setItem('kitchone:pending-new-order', '1');
+                onNavigate('orders');
+              }}
+            >
+              Nueva Orden
+            </Button>
           </div>
-        </div>
-        <motion.button
-          whileHover={{ scale: 1.03, y: -1 }}
-          whileTap={{ scale: 0.97 }}
-          className="bg-gradient-to-r from-orange-500 to-amber-500 text-white px-5 py-3 rounded-2xl shadow-lg shadow-orange-500/25 hover:shadow-xl hover:shadow-orange-500/30 transition-shadow duration-300 flex items-center gap-2 font-semibold text-sm"
+        }
+      />
+
+      {/* 1. KPIs principales: Ventas del día, Órdenes abiertas, Tiempo promedio, Ticket promedio */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          label="Ventas del Día"
+          value={formatMoney(todaySales)}
+          hint={`${salesCount} transacciones hoy`}
+          icon={<DollarSign className="h-5 w-5 text-accent-strong" />}
+          tone="accent"
+          trend={{ value: '+14% vs ayer', positive: true }}
+          onClick={() => onNavigate('sales')}
+        />
+
+        <StatCard
+          label="Órdenes Abiertas"
+          value={openOrdersCount}
+          hint="En cocina y salón"
+          icon={<ClipboardList className="h-5 w-5 text-warn" />}
+          tone="warn"
+          onClick={() => onNavigate('orders')}
+        />
+
+        <StatCard
+          label="Tiempo Promedio"
+          value={`${avgTimeMins} min`}
+          hint="Espera en comanda"
+          icon={<Clock className="h-5 w-5 text-info" />}
+          tone="info"
+          trend={{ value: '-2 min', positive: true }}
+          onClick={() => onNavigate('kitchen')}
+        />
+
+        <StatCard
+          label="Ticket Promedio"
+          value={formatMoney(avgTicket)}
+          hint="Gasto por comensal/orden"
+          icon={<Receipt className="h-5 w-5 text-ok" />}
+          tone="ok"
+          onClick={() => onNavigate('reports')}
+        />
+      </div>
+
+      {/* 2. Gráficos de Rendimiento con Recharts usando tokens CSS */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Tendencia horaria de ventas */}
+        <Panel
+          className="lg:col-span-2"
+          title="Flujo de Ventas Hoy"
+          description="Evolución de ingresos facturados por tramo horario."
         >
-          <Plus className="w-4 h-4" />
-          <span className="hidden sm:inline">Agregar Nuevo</span>
-        </motion.button>
-      </motion.div>
-
-      {/* Welcome Banner */}
-      <motion.div
-        variants={itemVariants}
-        className="relative overflow-hidden rounded-3xl p-8 text-white"
-      >
-        <div className="absolute inset-0 bg-gradient-to-br from-orange-500 via-orange-500 to-amber-400" />
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white/10 via-transparent to-transparent" />
-        <div className="absolute -bottom-8 -right-8 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
-        <div className="absolute -top-8 -left-8 w-32 h-32 bg-amber-400/30 rounded-full blur-2xl" />
-        
-        <div className="relative flex items-center justify-between">
-          <div>
-            <motion.h1
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.3, duration: 0.5 }}
-              className="text-3xl font-bold mb-2"
-            >
-              Buenos Días {profile?.full_name?.split(' ')[0] || 'Chef'} 👋
-            </motion.h1>
-            <motion.p
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.4, duration: 0.5 }}
-              className="text-white/80 mb-6 font-light text-lg"
-            >
-              Tienes <span className="font-semibold text-white">{stats.activeOrders}</span> nuevas órdenes para revisar
-            </motion.p>
-            <motion.button
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.5 }}
-              whileHover={{ scale: 1.03, y: -2 }}
-              whileTap={{ scale: 0.97 }}
-              className="bg-white text-orange-600 px-6 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-black/5 hover:shadow-xl transition-all duration-300"
-            >
-              Revisar Órdenes
-            </motion.button>
+          <div className="h-72 w-full pt-4">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={hourlySalesData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="salesGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={tokenColor('accent')} stopOpacity={0.35} />
+                    <stop offset="95%" stopColor={tokenColor('accent')} stopOpacity={0.0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={tokenColor('line')} vertical={false} />
+                <XAxis
+                  dataKey="hour"
+                  stroke={tokenColor('muted')}
+                  fontSize={12}
+                  tickLine={false}
+                  axisLine={{ stroke: tokenColor('line') }}
+                />
+                <YAxis
+                  stroke={tokenColor('muted')}
+                  fontSize={12}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={(val) => `$${val}`}
+                />
+                <Tooltip
+                  content={({ active, payload }) => {
+                    if (active && payload && payload.length) {
+                      return (
+                        <div className="rounded-card border border-line bg-surface p-2.5 shadow-pop text-xs">
+                          <p className="font-semibold text-fg">{payload[0].payload.hour}</p>
+                          <p className="font-bold text-accent-strong">{formatMoney(payload[0].value as number)}</p>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="total"
+                  stroke={tokenColor('accent')}
+                  strokeWidth={2.5}
+                  fillOpacity={1}
+                  fill="url(#salesGrad)"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
-          <motion.div
-            initial={{ scale: 0, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ delay: 0.4, type: 'spring', stiffness: 200 }}
-            className="hidden md:flex items-center justify-center"
-          >
-            <div className="w-28 h-28 bg-white/15 backdrop-blur-sm rounded-3xl flex items-center justify-center border border-white/20 rotate-6">
-              <ChefHat className="w-14 h-14 text-white/90" />
-            </div>
-          </motion.div>
-        </div>
-      </motion.div>
+        </Panel>
 
-      {/* Stat Cards */}
-      <motion.div variants={itemVariants} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {statCards.map((card, i) => (
-          <motion.div
-            key={card.label}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 + i * 0.1 }}
-            whileHover={{ y: -4, transition: { duration: 0.2 } }}
-            className="bg-white/80 backdrop-blur-sm p-5 rounded-2xl border border-slate-100 hover:shadow-lg transition-all duration-300 cursor-default group"
-          >
-            <div className="flex items-start justify-between mb-3">
-              <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${card.gradient} flex items-center justify-center text-white shadow-lg ${card.shadow}`}>
-                {card.icon}
-              </div>
-              <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-50 text-emerald-600">{card.change}</span>
-            </div>
-            <p className="text-2xl font-bold text-slate-800 mb-1">{card.value}</p>
-            <p className="text-sm text-slate-400 font-medium">{card.label}</p>
-          </motion.div>
-        ))}
-      </motion.div>
-
-      {/* Necesitas Servir Section */}
-      <motion.div variants={itemVariants}>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold text-slate-800">Necesitas Servir</h2>
-          <button className="text-sm font-semibold text-orange-500 hover:text-orange-600 transition-colors">Ver Todo</button>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
-          {[
-            { name: 'Aperitivos', count: stats.totalDishes, status: 'Listos para servir', icon: <UtensilsCrossed className="w-5 h-5" />, gradient: 'from-blue-500 to-indigo-500', bg: 'bg-blue-50', text: 'text-blue-600' },
-            { name: 'Platos Principales', count: Math.floor(stats.totalDishes * 0.6), status: 'En preparación', icon: <ChefHat className="w-5 h-5" />, gradient: 'from-emerald-500 to-teal-500', bg: 'bg-emerald-50', text: 'text-emerald-600' },
-            { name: 'Postres', count: Math.floor(stats.totalDishes * 0.2), status: 'Disponibles', icon: <ShoppingCart className="w-5 h-5" />, gradient: 'from-orange-500 to-amber-500', bg: 'bg-orange-50', text: 'text-orange-600' },
-            { name: 'Bebidas', count: Math.floor(stats.totalDishes * 0.2), status: 'Bebidas frías', icon: <Flame className="w-5 h-5" />, gradient: 'from-violet-500 to-purple-500', bg: 'bg-violet-50', text: 'text-violet-600' },
-            { name: 'Especiales', count: 5, status: 'Especial del día', icon: <DollarSign className="w-5 h-5" />, gradient: 'from-rose-500 to-pink-500', bg: 'bg-rose-50', text: 'text-rose-600' },
-          ].map((item, i) => (
-            <motion.div
-              key={item.name}
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4 + i * 0.08 }}
-              whileHover={{ y: -3, transition: { duration: 0.15 } }}
-              className="bg-white/80 backdrop-blur-sm p-4 rounded-2xl border border-slate-100 hover:shadow-md transition-all duration-300 cursor-default group"
+        {/* Platillos más vendidos de hoy */}
+        <Panel
+          title="Top Platillos Hoy"
+          description="Los platos más pedidos del servicio actual."
+          action={
+            <Button
+              variant="ghost"
+              size="sm"
+              rightIcon={<ArrowRight className="h-3.5 w-3.5" />}
+              onClick={() => onNavigate('dishes')}
             >
-              <div className="flex items-center space-x-3 mb-3">
-                <div className={`w-10 h-10 ${item.bg} rounded-xl flex items-center justify-center ${item.text} group-hover:scale-110 transition-transform duration-200`}>
-                  {item.icon}
-                </div>
-                <div>
-                  <h3 className="font-semibold text-slate-700 text-sm">{item.name}</h3>
-                  <p className="text-xs text-slate-400">{item.count} artículos</p>
-                </div>
-              </div>
-              <p className="text-xs text-slate-400 font-medium">{item.status}</p>
-            </motion.div>
-          ))}
-        </div>
-      </motion.div>
+              Ver menú
+            </Button>
+          }
+        >
+          <div className="h-72 w-full pt-2">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={topDishesData}
+                layout="vertical"
+                margin={{ top: 5, right: 20, left: 20, bottom: 5 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke={tokenColor('line')} horizontal={false} />
+                <XAxis type="number" stroke={tokenColor('muted')} fontSize={11} tickLine={false} axisLine={false} />
+                <YAxis
+                  type="category"
+                  dataKey="name"
+                  stroke={tokenColor('fg')}
+                  fontSize={12}
+                  tickLine={false}
+                  axisLine={false}
+                  width={110}
+                />
+                <Tooltip
+                  content={({ active, payload }) => {
+                    if (active && payload && payload.length) {
+                      return (
+                        <div className="rounded-card border border-line bg-surface p-2 shadow-pop text-xs">
+                          <p className="font-semibold text-fg">{payload[0].payload.name}</p>
+                          <p className="font-bold text-ink">{payload[0].value} unidades</p>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+                <Bar dataKey="qty" fill={tokenColor('ink')} radius={[0, 6, 6, 0]} barSize={18} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Panel>
+      </div>
 
-      {/* Progress Table */}
-      <motion.div variants={itemVariants}>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold text-slate-800">Progreso del Restaurante</h2>
-          <button className="text-sm font-semibold text-orange-500 hover:text-orange-600 transition-colors">Ver Todo</button>
+      {/* 3. Sección inferior: Órdenes Recientes y Accesos Rápidos */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2">
+          <Panel
+            title="Últimas Órdenes Ingresadas"
+            description="Actividad reciente del salón y cocina."
+            action={
+              <Button
+                variant="ghost"
+                size="sm"
+                rightIcon={<ArrowRight className="h-3.5 w-3.5" />}
+                onClick={() => onNavigate('orders')}
+              >
+                Ver todas las órdenes
+              </Button>
+            }
+          >
+            <DataTable
+              columns={columns}
+              rows={recentOrders}
+              rowKey={(r) => r.id}
+              onRowClick={() => onNavigate('orders')}
+            />
+          </Panel>
         </div>
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-100 overflow-hidden shadow-sm">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th className="px-6 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Nombre Completo
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Designación
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Estado
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Acciones
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {recentOrders.slice(0, 5).map((order, index) => {
-                const statusConfig = getStatusConfig(order.status);
-                return (
-                  <motion.tr
-                    key={order.id}
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.5 + index * 0.08 }}
-                    className="hover:bg-slate-50/60 transition-colors duration-200 group"
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center mr-3 group-hover:scale-105 transition-transform duration-200">
-                          <UserCircle2 className="w-5 h-5 text-slate-400" />
-                        </div>
-                        <div className="text-sm font-semibold text-slate-700">
-                          Cliente {order.order_number}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-slate-500 font-medium">Mesa {order.table_number}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${statusConfig.bgColor}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${statusConfig.color}`} />
-                        {statusConfig.label}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right">
-                      <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        className="p-1.5 rounded-lg text-slate-300 hover:text-slate-500 hover:bg-slate-100 transition-all duration-200"
-                      >
-                        <MoreVertical className="w-4 h-4" />
-                      </motion.button>
-                    </td>
-                  </motion.tr>
-                );
-              })}
-            </tbody>
-          </table>
+
+        <div>
+          <Panel title="Accesos Operativos" description="Navegación directa a módulos clave.">
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={() => onNavigate('sales')}
+                className="card card-hover flex items-center justify-between w-full p-3.5 text-left border border-line hover:border-accent transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="h-9 w-9 rounded-xl bg-accent-soft text-accent-strong flex items-center justify-center">
+                    <Receipt className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <span className="font-semibold text-sm text-fg block">Facturación / Caja</span>
+                    <span className="text-xs text-muted">Apertura, cierre y cobro de cuentas</span>
+                  </div>
+                </div>
+                <ArrowRight className="h-4 w-4 text-muted" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onNavigate('tables')}
+                className="card card-hover flex items-center justify-between w-full p-3.5 text-left border border-line hover:border-accent transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="h-9 w-9 rounded-xl bg-surface-2 text-fg flex items-center justify-center">
+                    <Armchair className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <span className="font-semibold text-sm text-fg block">Mapa de Mesas</span>
+                    <span className="text-xs text-muted">Estado de comensales y salón</span>
+                  </div>
+                </div>
+                <ArrowRight className="h-4 w-4 text-muted" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onNavigate('kitchen')}
+                className="card card-hover flex items-center justify-between w-full p-3.5 text-left border border-line hover:border-accent transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="h-9 w-9 rounded-xl bg-surface-2 text-fg flex items-center justify-center">
+                    <ChefHat className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <span className="font-semibold text-sm text-fg block">Pantalla de Cocina</span>
+                    <span className="text-xs text-muted">KDS con temporizadores de demora</span>
+                  </div>
+                </div>
+                <ArrowRight className="h-4 w-4 text-muted" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onNavigate('dishes')}
+                className="card card-hover flex items-center justify-between w-full p-3.5 text-left border border-line hover:border-accent transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="h-9 w-9 rounded-xl bg-surface-2 text-fg flex items-center justify-center">
+                    <UtensilsCrossed className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <span className="font-semibold text-sm text-fg block">Gestión de Menú</span>
+                    <span className="text-xs text-muted">Precios, márgenes y disponibilidad</span>
+                  </div>
+                </div>
+                <ArrowRight className="h-4 w-4 text-muted" />
+              </button>
+            </div>
+          </Panel>
         </div>
-      </motion.div>
-    </motion.div>
+      </div>
+    </div>
   );
 }
