@@ -20,6 +20,7 @@ import Kitchen from './pages/Kitchen';
 import History from './pages/History';
 import Reports from './pages/Reports';
 import Config from './pages/Config';
+import Quotations from './pages/Quotations';
 
 function AppContent() {
   const { user, profile, loading } = useAuth();
@@ -55,6 +56,8 @@ function AppContent() {
         return <Expenses />;
       case 'sales':
         return <Sales onNavigate={setCurrentPage} />;
+      case 'quotations':
+        return <Quotations onNavigate={setCurrentPage} />;
       case 'orders':
         return <Orders />;
       case 'kitchen':

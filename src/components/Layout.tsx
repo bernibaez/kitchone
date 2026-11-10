@@ -22,6 +22,7 @@ import {
   Plus,
   LockKeyhole,
   CircleDot,
+  FileText,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useTheme } from '../lib/theme';
@@ -57,6 +58,7 @@ const GROUPS: MenuGroup[] = [
       { id: 'orders', label: 'Órdenes', icon: (c) => <ClipboardList className={c} />, roles: ['admin', 'mesero'], badge: 'open' },
       { id: 'kitchen', label: 'Cocina', icon: (c) => <ChefHat className={c} />, roles: ['admin', 'cocinero'], badge: 'kitchen' },
       { id: 'sales', label: 'Facturación', icon: (c) => <Receipt className={c} />, roles: ['admin', 'mesero'] },
+      { id: 'quotations', label: 'Cotizaciones', icon: (c) => <FileText className={c} />, roles: ['admin', 'mesero'] },
       { id: 'tables', label: 'Mesas', icon: (c) => <Armchair className={c} />, roles: ['admin'] },
     ],
   },
@@ -110,6 +112,10 @@ export default function Layout({ children, currentPage, onNavigate }: LayoutProp
   const canSee = useCallback(
     (item: MenuItem) => {
       if (!profile) return false;
+      // Los administradores siempre tienen acceso a los módulos asignados a 'admin'
+      if (profile.role === 'admin') {
+        return item.roles.includes('admin');
+      }
       // Si el usuario tiene módulos personalizados se respetan; si no, se usa el rol.
       if (profile.allowed_modules && profile.allowed_modules.length > 0) {
         return profile.allowed_modules.includes(item.id);
@@ -220,6 +226,7 @@ export default function Layout({ children, currentPage, onNavigate }: LayoutProp
     );
     const actions: CommandItem[] = [
       ...(canOrder ? [{ id: 'act-new-order', label: 'Nueva orden', group: 'Acciones', icon: <Plus className="h-4 w-4" />, keywords: 'crear pedido mesa', run: startNewOrder }] : []),
+      { id: 'act-new-quotation', label: 'Nueva cotización', group: 'Acciones', icon: <FileText className="h-4 w-4" />, keywords: 'crear cotizacion presupuesto banquete', run: () => onNavigate('quotations') },
       { id: 'act-theme', label: theme === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro', group: 'Acciones', icon: theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />, keywords: 'modo oscuro claro tema', run: toggle },
       { id: 'act-logout', label: 'Cerrar sesión', group: 'Acciones', icon: <LogOut className="h-4 w-4" />, keywords: 'salir', run: signOut },
     ];

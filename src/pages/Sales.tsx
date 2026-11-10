@@ -34,6 +34,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { generateInvoicePDF, type InvoiceItem } from '../lib/invoice';
+import { updateQuotationStatus } from '../lib/quotations';
 
 interface Dish {
   id: string;
@@ -122,6 +123,7 @@ export default function Sales({ onNavigate }: SalesProps) {
   const [customerName, setCustomerName] = useState<string>('');
   const [editSaleId, setEditSaleId] = useState<string | null>(null);
   const [editingSaleNumber, setEditingSaleNumber] = useState<string | null>(null);
+  const [pendingQuoteId, setPendingQuoteId] = useState<string | null>(null);
 
   // Órdenes terminadas
   const [finishedOrders, setFinishedOrders] = useState<Array<{
@@ -313,10 +315,42 @@ export default function Sales({ onNavigate }: SalesProps) {
       loadSaleForEdit(id);
     }
 
+    const quotePayloadRaw = sessionStorage.getItem('quote_to_sale');
+    if (quotePayloadRaw) {
+      try {
+        const quotePayload = JSON.parse(quotePayloadRaw);
+        if (quotePayload.quotationId) {
+          setPendingQuoteId(quotePayload.quotationId);
+        }
+        if (quotePayload.customerName) {
+          setCustomerName(quotePayload.customerName);
+        }
+        if (Array.isArray(quotePayload.items) && quotePayload.items.length > 0) {
+          const mappedItems: CartItem[] = quotePayload.items.map((it: any) => ({
+            id: it.dish_id || `quote-${Date.now()}-${Math.random()}`,
+            name: it.name,
+            price: it.price,
+            percentage: it.discount_percent ?? 0,
+            quantity: it.quantity,
+          }));
+          setCart(mappedItems);
+        }
+        toast({
+          title: `Cotización ${quotePayload.quoteNumber || ''} cargada en caja`,
+          message: 'Listo para registrar el pago o factura.',
+          tone: 'ok',
+        });
+      } catch (e) {
+        console.error('Error loading quote into sales cart:', e);
+      } finally {
+        sessionStorage.removeItem('quote_to_sale');
+      }
+    }
+
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [loadDishes, checkCashStatus, loadFinishedOrders, loadSaleForEdit]);
+  }, [loadDishes, checkCashStatus, loadFinishedOrders, loadSaleForEdit, toast]);
 
   // Manejo de apertura de caja
   const handleOpenCash = async () => {
@@ -554,6 +588,16 @@ export default function Sales({ onNavigate }: SalesProps) {
       const sourceOrderIds = Array.from(new Set(cart.map((i) => i.sourceOrderId).filter(Boolean) as string[]));
       for (const orderId of sourceOrderIds) {
         await supabase.from('orders').update({ status: 'facturada' } as any).eq('id', orderId);
+      }
+
+      // Si provino de una cotización, marcarla como facturada
+      if (pendingQuoteId) {
+        try {
+          await updateQuotationStatus(pendingQuoteId, 'facturada', saleId || undefined);
+          setPendingQuoteId(null);
+        } catch (qErr) {
+          console.warn('Error updating quotation to facturada:', qErr);
+        }
       }
 
       // Generar ticket PDF

@@ -24,6 +24,7 @@ import {
   ArrowRight,
   Armchair,
   UtensilsCrossed,
+  FileText,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -209,6 +210,13 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         description="Resumen operativo del restaurante en tiempo real."
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              leftIcon={<FileText className="h-4 w-4" />}
+              onClick={() => onNavigate('quotations')}
+            >
+              Cotizaciones
+            </Button>
             <Button
               variant="outline"
               leftIcon={<ChefHat className="h-4 w-4" />}

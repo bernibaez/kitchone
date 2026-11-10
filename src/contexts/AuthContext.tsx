@@ -28,6 +28,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const normalizeProfile = (p: UserProfile | null): UserProfile | null => {
+    if (!p) return null;
+    if (p.role === 'admin' && Array.isArray(p.allowed_modules) && !p.allowed_modules.includes('quotations')) {
+      const updated = [...p.allowed_modules, 'quotations'];
+      supabase.from('users_profile').update({ allowed_modules: updated }).eq('id', p.id).then();
+      return { ...p, allowed_modules: updated };
+    }
+    return p;
+  };
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       (async () => {
@@ -46,7 +56,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             // Don't throw error, just set profile to null
             setProfile(null);
           } else {
-            setProfile(data);
+            setProfile(normalizeProfile(data));
           }
         }
 
@@ -73,7 +83,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             // Don't throw error, just set profile to null
             setProfile(null);
           } else {
-            setProfile(data);
+            setProfile(normalizeProfile(data));
           }
         } else {
           setProfile(null);

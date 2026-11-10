@@ -46,6 +46,7 @@ export const AVAILABLE_MODULES = [
   { id: 'tables', label: 'Mesas' },
   { id: 'expenses', label: 'Gastos' },
   { id: 'sales', label: 'Facturación' },
+  { id: 'quotations', label: 'Cotizaciones' },
   { id: 'orders', label: 'Órdenes' },
   { id: 'kitchen', label: 'Cocina' },
   { id: 'history', label: 'Historial' },
@@ -54,10 +55,10 @@ export const AVAILABLE_MODULES = [
 ];
 
 export const DEFAULT_MODULES_BY_ROLE: Record<string, string[]> = {
-  admin: ['dashboard', 'users', 'customers', 'categories', 'dishes', 'tables', 'expenses', 'sales', 'orders', 'kitchen', 'history', 'reports', 'config'],
-  mesero: ['dashboard', 'customers', 'sales', 'orders'],
+  admin: ['dashboard', 'users', 'customers', 'categories', 'dishes', 'tables', 'expenses', 'sales', 'quotations', 'orders', 'kitchen', 'history', 'reports', 'config'],
+  mesero: ['dashboard', 'customers', 'sales', 'quotations', 'orders'],
   cocinero: ['dashboard', 'kitchen'],
-  cajero: ['dashboard', 'sales', 'history'],
+  cajero: ['dashboard', 'sales', 'quotations', 'history'],
 };
 
 const ROLE_LABELS: Record<string, { label: string; tone: 'accent' | 'info' | 'ok' | 'warn' | 'neutral' }> = {
